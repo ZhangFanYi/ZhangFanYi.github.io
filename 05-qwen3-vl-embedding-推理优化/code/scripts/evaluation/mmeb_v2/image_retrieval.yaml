@@ -1,0 +1,75 @@
+# RET i -> t
+MSCOCO_i2t:
+    dataset_parser: image_i2t
+    dataset_name: MSCOCO_i2t
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+VisualNews_i2t:
+    dataset_parser: image_i2t
+    dataset_name: VisualNews_i2t
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+# RET t -> i
+VisDial:
+    dataset_parser: image_t2i
+    dataset_name: VisDial
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+MSCOCO_t2i:
+    dataset_parser: image_t2i
+    dataset_name: MSCOCO_t2i
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+VisualNews_t2i:
+    dataset_parser: image_t2i
+    dataset_name: VisualNews_t2i
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+WebQA:
+    dataset_parser: image_t2i
+    dataset_name: WebQA
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+EDIS:
+    dataset_parser: image_t2i
+    dataset_name: EDIS
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+Wiki-SS-NQ:
+    dataset_parser: image_t2i
+    dataset_name: Wiki-SS-NQ
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+# RET i -> i
+CIRR:
+    dataset_parser: image_i2i_vg
+    dataset_name: CIRR
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+NIGHTS:
+    dataset_parser: image_i2i_vg
+    dataset_name: NIGHTS
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+OVEN:
+    dataset_parser: image_i2i_vg
+    dataset_name: OVEN
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+FashionIQ:
+    dataset_parser: image_i2i_vg
+    dataset_name: FashionIQ
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

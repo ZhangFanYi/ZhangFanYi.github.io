@@ -1,0 +1,9 @@
+[submodule "third_party/Megatron-LM"]
+	path = third_party/Megatron-LM
+	url = https://github.com/NVIDIA/Megatron-LM.git
+[submodule "third_party/verl"]
+	path = third_party/verl
+	url = https://github.com/verl-project/verl.git
+[submodule "third_party/VeOmni"]
+	path = third_party/VeOmni
+	url = https://github.com/ByteDance-Seed/VeOmni.git

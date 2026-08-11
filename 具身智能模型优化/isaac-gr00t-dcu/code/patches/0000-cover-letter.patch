@@ -1,0 +1,91 @@
+From 9c7e746b2cd37a810070a98ef41d290a07e806c2 Mon Sep 17 00:00:00 2001
+From: zhangyf9 <zhangyf9@hygon.cn>
+Date: Mon, 3 Aug 2026 10:00:00 +0800
+Subject: [PATCH 0/5] Isaac-GR00T: add DCU/DTK training optimizations
+
+本 patch 系列基于官方提交 9c7e746（GR00T N1.7 General Release 后），
+提取并整理 Isaac-GR00T 在 DCU/DTK 环境中的训练相关修改。
+
+共包含 5 个 commits，修改 7 个正式源码和配置文件。
+
+1. 归一化 DeepSpeed 桶大小
+
+修改文件：
+- gr00t/configs/deepspeed/zero2_config.json
+- gr00t/configs/deepspeed/zero3_config.json
+
+将 zero2/zero3 配置中的科学计数法浮点值（1e9/1e8 等）改为显式整数，
+并修正 JSON 缩进。
+
+2. 关闭 TF32
+
+修改文件：
+- gr00t/configs/training/training_config.py
+
+将 tf32 由 True 调整为 False，适配 DCU/DTK 环境。
+
+3. 增加 profiling 开关并使用融合 AdamW
+
+修改文件：
+- gr00t/configs/finetune_config.py
+- gr00t/experiment/launch_finetune.py
+
+增加 enable_profiling 配置项，并将优化器由 adamw_torch 切换为
+adamw_torch_fused。
+
+4. 编译 action head 并调整 profiler 调度
+
+修改文件：
+- gr00t/experiment/experiment.py
+
+对 model.action_head 使用 torch.compile（当前为配合 rocBLAS
+profiling 而禁用），并将 profiler schedule 的 skip_first 从 10
+调整为 90。
+
+5. 增加 torch profiler 集成
+
+修改文件：
+- gr00t/experiment/trainer.py
+
+重写 training_step，在 rank 0 于指定 step 触发一次 torch.profiler，
+打印按 CUDA 时间排序的算子表格并导出 Chrome trace。
+
+运行环境：
+
+- 基础镜像：torch2.x-dtk2604
+- 加速设备：DCU
+- 数据 /public/home/zhangyf9/groot/Isaac-GR00T
+
+未纳入 patch 的内容：
+
+- *.bak / *.bak_0714 / *.bak_0721_* 备份文件
+- 工作区中的调试输出与日志
+
+已包含验证：
+
+- 对比官方基线 9c7e746 逐文件 diff 确认改动范围
+
+待完成验证：
+
+- patch 在官方基线上的 git am 应用验证
+- torch2.x-dtk2604 容器内的启动验证
+- 优化前后的训练性能对比
+
+zhangyf9 (5):
+  perf(deepspeed): use integer bucket sizes in zero2/zero3 configs
+  perf(config): disable TF32 for finetuning
+  perf(config): add enable_profiling flag and use fused AdamW
+  perf(experiment): compile action head and tune profiler schedule
+  perf(trainer): add torch profiler integration
+
+ gr00t/configs/deepspeed/zero2_config.json  |  25 ++++++++---------
+ gr00t/configs/deepspeed/zero3_config.json  |  37 +++++++++++++--------------
+ gr00t/configs/finetune_config.py           |   3 +++
+ gr00t/configs/training/training_config.py  |   2 +-
+ gr00t/experiment/experiment.py             |   4 +-
+ gr00t/experiment/launch_finetune.py        |   6 +++--
+ gr00t/experiment/trainer.py                |  40 ++++++++++++++++++++++++++++++++
+ 7 files changed, 80 insertions(+), 37 deletions(-)
+
+--
+2.31.1

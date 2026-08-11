@@ -1,0 +1,187 @@
+From e59f536c3fe476413117e7df89fe4b5f98552145 Mon Sep 17 00:00:00 2001
+From: wushw <wushw@rogon.cn>
+Date: Fri, 31 Jul 2026 14:56:57 +0800
+Subject: [PATCH 0/5] *** SUBJECT HERE ***
+Subject: [PATCH 0/5] lingbot-va: add DCU/DTK training optimizations
+
+本 patch 系列基于官方提交 58c2ae5，提取并整理 LingBot-VA
+在 DCU/DTK 环境中的训练相关修改。
+
+共包含 5 个 commits，修改 6 个正式源码和配置文件。
+
+1. 调整 FSDP 分片粒度
+
+修改文件：
+- wan_va/distributed/fsdp.py
+
+官方版本在每个 Transformer block 中分别对 attn1、attn2 和
+ffn 执行 fully_shard，然后再对整个 block 和 model 执行
+fully_shard，形成细粒度的嵌套 FSDP 包装。
+
+修改后取消 attn1、attn2 和 ffn 的独立 fully_shard，只保留：
+
+- Transformer block 级 fully_shard
+- model 级 fully_shard
+
+该改动将 FSDP 包装粒度从子模块级调整为 Transformer block
+级，减少 FSDP 单元数量和 collective 启动频率，并为下一个
+block 的参数通信预取提供更大的计算窗口，从而改善计算与
+通信重叠的条件。
+
+以下部分保持不变：
+
+- Activation Checkpointing 策略
+- param_dtype=bfloat16
+- reduce_dtype=float32
+- reshard_after_forward=True
+- free_model 显存释放逻辑
+
+2. 增加 DCU 模型算子优化
+
+修改文件：
+- wan_va/modules/model.py
+
+主要修改包括：
+
+- 将 query/key 使用的 torch.nn.RMSNorm 替换为 DCU 自研
+  lightop.RMSNorm；
+- 将 RoPE 应用逻辑从 forward 内部函数提取为成员方法
+  _apply_rotary_emb；
+- 将 Transformer block 中的部分计算提取为：
+  - _attn1_input
+  - _attn2_input
+  - _ffn_residual
+- 增加 COMPILE_BLOCK_OPS 环境变量；
+- 当 COMPILE_BLOCK_OPS=1 时，使用 torch.compile(dynamic=True)
+  编译上述热点子操作。
+
+这些修改允许 TorchInductor 对 RoPE、attention 输入处理和
+FFN residual 等频繁执行的操作进行计算图优化。
+
+当前 patch 没有启用整个 Transformer block 的 torch.compile，
+仅启用子操作级别的选择性编译。
+
+模型主体结构、KV cache、FlexAttention、训练/推理接口和
+输入输出形式保持不变。
+
+3. 增加训练复现和性能分析能力
+
+修改文件：
+- wan_va/train.py
+
+主要修改包括：
+
+- 增加 SEED=42，对 Python、NumPy、PyTorch 和设备随机数生成器
+  设置固定随机种子；
+- 增加 PROF_STEP 环境变量，在指定训练 step 触发
+  torch.profiler；
+- profiler 记录 CPU 和设备算子耗时，并导出 Chrome trace；
+- _train_step 增加 skip_optimizer 参数，用于控制梯度同步和
+  optimizer step；
+- 增加 CPU_AFFINITY 环境变量，根据 local_rank 将训练进程
+  绑定到指定 CPU 核心。
+
+当前训练和 profiler 调用路径均传入 skip_optimizer=False，
+因此该参数属于预留运行控制，不改变正常训练路径。
+
+CPU affinity 用于减少跨 NUMA 节点的进程迁移和内存访问。
+根据现有实验，该模型暂未观察到明显的绑核性能收益，因此该
+功能作为可选平台配置保留，不作为主要性能收益宣称。
+
+文件中还包含固定 step 计时及被注释的实验 hook，这些属于
+实验和调试辅助代码，不作为正式优化效果。
+
+4. 增加四卡 DTK 启动配置
+
+修改文件：
+- script/run_va_posttrain.sh
+
+主要修改包括：
+
+- 默认 GPU 数量由 8 调整为 4；
+- MASTER_PORT 由 29501 调整为 29599；
+- 设置当前 bw 节点使用的 GPU 映射；
+- 设置与 GPU 对应的 CPU_AFFINITY；
+- 启用 COMPILE_BLOCK_OPS；
+- 增加 DTK/Triton/TorchInductor 相关环境变量：
+  - TRITON_FLEX_ASYMMETRIC_BWD
+  - TORCHINDUCTOR_FORCE_POINTER_RANGE
+  - NVTE_USE_HIPBLASLT_GROUPEDGEMM
+  - HSA_FORCE_FINE_GRAIN_PCIE
+
+其中 GPU 编号、CPU_AFFINITY 和端口属于当前节点的环境适配，
+并非通用性能优化。迁移到其他节点时需要根据硬件拓扑修改。
+
+5. 更新 RobotWin 训练配置
+
+修改文件：
+- wan_va/configs/va_robotwin_cfg.py
+- wan_va/configs/va_robotwin_train_cfg.py
+
+实际修改包括：
+
+- 将预训练模型占位路径替换为当前环境中的模型路径；
+- 将数据集占位路径替换为当前 RobotWin 数据集路径；
+- 显式设置 enable_flash_attn=False；
+- 最终生效的 enable_wandb=False。
+
+模型和数据集路径属于当前环境适配，不属于性能优化。关闭
+Flash Attention 与当前 DTK 环境的兼容性有关；关闭 W&B 用于
+避免训练过程中产生网络日志开销。
+
+运行环境：
+
+- 基础镜像：torch2.9-dtk2604
+- 加速设备：DCU
+- 自研算子库：lightop
+- 训练卡数：4
+
+启动命令：
+
+NGPU=4 CONFIG_NAME=robotwin_train \
+bash script/run_va_posttrain.sh
+
+未纳入 patch 的内容：
+
+- profiler JSON 和训练日志
+- RCCL/性能分析数据库
+- TorchInductor 调试输出
+- Triton autotune 产物
+- backup 文件
+- run_va_posttrain_1.sh
+- run_va_posttrain_fzx.sh
+- wan_va/autotune_patch.py
+- wan_va/configs/autotune_patch.py
+
+已完成验证：
+
+- Python py_compile：通过
+- Bash 语法检查：通过
+- Git 工作区检查：通过
+- 源码修改范围检查：通过
+
+待完成验证：
+
+- patch 在官方基线上的 git am 应用验证
+- torch2.9-dtk2604 容器内的 4 卡启动验证
+- FSDP 修改前后的训练性能对比
+*** BLURB HERE ***
+
+wushw (5):
+  perf(fsdp): wrap model at transformer-block granularity
+  perf(model): use lightop RMSNorm and selective torch.compile
+  perf(train): add profiling and runtime controls
+  perf(script): add 4-GPU DTK runtime configuration
+  chore(config): update RobotWin training configuration
+
+ script/run_va_posttrain.sh              |  41 +++++-
+ wan_va/configs/va_robotwin_cfg.py       |   2 +-
+ wan_va/configs/va_robotwin_train_cfg.py |   6 +-
+ wan_va/distributed/fsdp.py              |   7 +-
+ wan_va/modules/model.py                 |  92 +++++++++-----
+ wan_va/train.py                         | 162 +++++++++++++++++++++---
+ 6 files changed, 253 insertions(+), 57 deletions(-)
+
+-- 
+2.31.1
+

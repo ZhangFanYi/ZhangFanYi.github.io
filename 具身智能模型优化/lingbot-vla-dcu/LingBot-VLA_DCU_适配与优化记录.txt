@@ -1,0 +1,338 @@
+================================================================================
+LingBot-VLA DCU 适配与优化完整记录
+日期: 2026-07-23
+机器: bw22 (42.228.13.241), 8x Hygon BW151 (gfx936) 64GB
+容器: fzx_lingbot (lingbot-vla-dcu:dtk26.04-torch2.7.1)
+参考文档: lingbot_vla.md
+================================================================================
+
+一、环境信息
+================================================================================
+
+  主机:      bw22 (zhangyf9@42.228.13.241)
+  GPU:       8x Hygon BW151 (gfx936), 64GB VRAM each
+  容器:      fzx_lingbot
+  镜像:      lingbot-vla-dcu:dtk26.04-torch2.7.1
+  PyTorch:   2.9.0+das.opt1.dtk2604 (DTK 内置，非 pip 安装)
+  ROCm/DTK:  内置
+  Python:    3.10
+  lerobot:   0.4.2 (从 0.3.3 升级)
+  transformers: 4.51.3
+  overlay:   /dev/nvme0n1 3.5T, 100% 满
+  NFS 挂载:  /zhangyifan → 12.12.12.223:/public4/home/zhangyf9 (91T, 12T 可用)
+
+  注意: 容器 overlay 已满，新文件必须写到 /zhangyifan/ (NFS) 再做符号链接。
+
+
+二、数据集下载
+================================================================================
+
+  pusht 数据集 (LeRobot v3.0 格式):
+
+    位置: /workspace/datasets/pusht/
+    大小: ~3.5GB
+    下载方式: 使用 lerobot 自带的 download 工具
+      lerobot-manual-download --repo-id lerobot/pusht --save-dir /workspace/datasets/
+
+    数据结构:
+      data/chunk-000/episode_000000.parquet ~ episode_000049.parquet (50 episodes)
+      videos/chunk-000/episode_000000.mp4 ~ episode_000049.mp4
+      info.json (meta)
+      stats.json
+
+    归一化统计: assets/norm_stats/pusht.json
+      包含 arm.position (2D), 75维 action, 75维 state 的 mean/std/min/max
+
+  注: pusht 是公开数据集，可直接从 HuggingFace 下载。
+
+
+三、模型下载
+================================================================================
+
+  1. LingBot-VLA 4B 预训练权重:
+     位置: /workspace/models/lingbot-vla-4b-posttrain-robotwin/
+     大小: ~23GB
+     来源: 内部预训练模型 (robotwin 预训练)
+     包含: model.safetensors, config.json, tokenizer 等
+
+  2. Qwen2.5-VL-3B-Instruct (tokenizer):
+     位置: /workspace/models/Qwen2.5-VL-3B-Instruct/
+     大小: ~6GB
+     来源: HuggingFace (Qwen/Qwen2.5-VL-3B-Instruct)
+     用途: tokenizer + vision encoder 基座
+
+  模型路径配置 (config.yaml):
+    model.model_path: /workspace/models/lingbot-vla-4b-posttrain-robotwin
+    model.tokenizer_path: /workspace/models/Qwen2.5-VL-3B-Instruct
+
+
+四、配置文件对照 (lingbot_vla.md vs 实际)
+================================================================================
+
+  [A] 与 MD 文档完全一致的配置:
+
+    1. config.json (模型配置):
+       - 删除了 dtype 字段 (MD 要求: 无 dtype 字段)
+       - 其余字段与模型自带 config.json 一致
+
+    2. pusht robot_config (configs/robot_configs/pusht.yaml):
+       - arm.position: 2D
+       - cameras: [camera_top]
+       - 与 MD 一致
+
+    3. norm_stats (assets/norm_stats/pusht.json):
+       - bounds_99 归一化
+       - 与 MD 一致
+
+    4. data 字段:
+       - datasets_type: vla
+       - data_name: pusht
+       - train_path: /workspace/datasets/pusht
+       - norm_type: bounds_99
+       - norm_stats_file: assets/norm_stats/pusht.json
+       - 与 MD 一致
+
+    5. train 字段 (大部分一致):
+       - loss_type: L1_fm
+       - data_parallel_mode: fsdp2
+       - enable_full_shard: false (关键: 关闭子模块级 shard)
+       - module_fsdp_enable: true
+       - use_compile: false (yaml 层面)
+       - enable_gradient_checkpointing: true
+       - enable_mixed_precision: true
+       - ckpt_manager: dcp
+
+  [B] 与 MD 文档不一致的配置:
+
+    1. pusht.yaml max_steps:
+       MD mb8 配置: max_steps: 60
+       实际 pusht.yaml: max_steps: 120
+       (我们跑的是 120 步，结果正常)
+
+    2.pusht.yaml micro_batch_size:
+       MD 有 mb1/mb4/mb8 三个版本
+       实际 pusht.yaml: micro_batch_size: 8 (对应 MD 的 mb8 版本)
+
+    3. torch 版本:
+       MD 基于 torch 2.7.1
+       实际容器: torch 2.9.0 (DTK 升级版)
+       (inductor 代码有差异，导致了 flex_attention compile bug)
+
+  [C] MD 文档中有但我们没有的文件:
+
+    1. benchmark_pusht.sh (已补创建)
+    2. parse_lingbot_step_times.py (已补创建)
+    3. pusht_full8_stable_mb1.yaml / mb4.yaml / mb8.yaml
+       (我们用 pusht.yaml 替代，参数等同 mb8)
+
+
+五、代码修改/补丁 (适配阶段)
+================================================================================
+
+  [Patch 1] base_dataset.py — 视频后端修复
+    文件: lingbotvla/data/vla_data/base_dataset.py
+    修改: video_backend 参数从默认 "torchcodec" 改为 "pyav"
+    原因: DCU 容器未安装 torchcodec，使用 pyav 解码
+    对应 MD: 是 (MD 要求安装 pyserial + deepdiff + 升级 lerobot)
+
+  [Patch 2] flex_attention.py (项目层) — compile 开关
+    文件: lingbotvla/models/vla/pi0/flex_attention.py
+    修改: 添加 LINGBOT_DISABLE_FLEX_COMPILE 环境变量控制
+          默认启用 torch.compile(flex_attention, mode="max-autotune-no-cudagraphs")
+    备份: .bak
+    对应 MD: 否 (MD 要求 use_compile: false，我们额外在模型代码层启用)
+
+  [Patch 3] flex_attention.py (inductor 层) — block_m AttributeError 修复
+    文件: /usr/local/lib/python3.10/dist-packages/torch/_inductor/kernel/flex/flex_attention.py
+    修改: 两处 else 分支，conf.block_m → getattr(conf, "block_m", getattr(conf, "block_m1", 0))
+    原因: ROCmFlexBwDConfig 没有 block_m 属性，autotune 模式下会 crash
+    备份: .bak2
+    对应 MD: 否 (MD 未提及此 bug，因 MD 基于 torch 2.7.1)
+
+  [Patch 4] config.json — 删除 dtype 字段
+    文件: /workspace/models/lingbot-vla-4b-posttrain-robotwin/config.json
+    修改: 删除 "dtype": "bfloat16" 字段
+    原因: Qwen2.5-VL 代码不识别 dtype 字段会报错
+    对应 MD: 是 (MD 明确要求)
+
+  [Patch 5] pyserial 安装
+    修改: pip install pyserial==3.5
+    原因: serial_win32.py 导入 serial 模块
+    对应 MD: 否 (MD 未提及，代码隐式依赖)
+
+  [Patch 6] deepdiff 安装
+    修改: pip install deepdiff==9.1.0
+    原因: 代码导入 deepdiff
+    对应 MD: 否 (MD 未提及，代码隐式依赖)
+
+  [Patch 7] lerobot 升级
+    修改: pip install -U lerobot (0.3.3 → 0.4.2)
+    原因: MD 要求
+    对应 MD: 是
+
+
+六、环境变量配置
+================================================================================
+
+  训练启动时需要的环境变量:
+
+    HF_ENDPOINT=https://hf-mirror.com          # HF 镜像
+    QWEN25_PATH=/workspace/models/Qwen2.5-VL-3B-Instruct
+    HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7        # 全部 8 卡
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7       # 训练脚本需要此变量计算 nproc
+    PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+    TOKENIZERS_PARALLELISM=false
+    TRITON_FLEX_TUNED=1                         # 启用 asymmetric bwd 配置
+    TRITON_FLEX_ASYMMETRIC_BWD=1                # 同上 (旧名兼容)
+    TORCHINDUCTOR_FORCE_POINTER_RANGE=1
+    HSA_FORCE_FINE_GRAIN_PCIE=1
+
+  对照 MD:
+    MD 有:  HF_ENDPOINT, QWEN25_PATH, HIP/CUDA_VISIBLE_DEVICES, PYTORCH_HIP_ALLOC_CONF
+    MD 无:  TRITON_FLEX_TUNED, TRITON_FLEX_ASYMMETRIC_BWD, TORCHINDUCTOR_FORCE_POINTER_RANGE,
+            HSA_FORCE_FINE_GRAIN_PCIE
+    以上 4 个是本次优化新增的。
+
+
+七、性能基准测试结果
+================================================================================
+
+  测试配置: pusht.yaml (micro_batch_size=8, global_batch=64, 8 GPU)
+  编译模式: torch.compile(flex_attention, mode="max-autotune-no-cudagraphs")
+
+  首次运行 (含编译 warmup):
+    Step 1:   ~120s (autotune 编译 24 个配置/kernel shape)
+    Step 2-3: ~1.7-1.8s (编译后稳定)
+
+  120 步完整运行统计 (最后 110 步, warmup=10):
+    Mean StepTime:    2.093s
+    Median StepTime:  1.838s
+    P50:              1.838s
+    P90:              2.646s
+    P95:              3.189s
+    Min:              1.797s
+    Max:              3.571s (checkpoint 保存 spike)
+
+  吞吐量:
+    samples/s total:  30.58 (global_batch=64)
+    samples/s/gpu:    3.82
+
+  纯训练性能 (排除 >3s spike):
+    Mean:             2.006s
+    Median:           1.842s
+    samples/s total:  31.90
+    samples/s/gpu:    3.99
+
+  对比:
+    MD 文档基准 (8 GPU mb8): 30.96 samples/s → 我们 30.58 (基本持平)
+    禁用 compile 时 (4 GPU mb1): ~3.6s/step → 启用后 ~1.8s/step (提速 ~50%)
+
+
+八、启动命令
+================================================================================
+
+  完整启动命令 (8 GPU, 120 步):
+
+    ssh zhangyf9@42.228.13.241 "ssh bw22 'docker exec -d fzx_lingbot bash -lc \"
+    cd /workspace/lingbot-vla
+    export HF_ENDPOINT=https://hf-mirror.com
+    export QWEN25_PATH=/workspace/models/Qwen2.5-VL-3B-Instruct
+    export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+    export TOKENIZERS_PARALLELISM=false
+    export TRITON_FLEX_TUNED=1
+    export TRITON_FLEX_ASYMMETRIC_BWD=1
+    export TORCHINDUCTOR_FORCE_POINTER_RANGE=1
+    export HSA_FORCE_FINE_GRAIN_PCIE=1
+    bash train.sh tasks/vla/train_lingbotvla.py configs/vla/pusht.yaml > /zhangyifan/robot/lingbot-vla-bench/run_120steps.log 2>&1
+    \"'""
+
+  使用 benchmark 脚本:
+
+    ssh zhangyf9@42.228.13.241 "ssh bw22 'docker exec -d fzx_lingbot bash -lc \"
+    cd /workspace/lingbot-vla
+    export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    benchmark_pusht.sh configs/vla/pusht.yaml
+    \"'"
+
+  查看日志:
+
+    ssh zhangyf9@42.228.13.241 "ssh bw22 'docker exec fzx_lingbot tail -20 /zhangyifan/robot/lingbot-vla-bench/run_120steps.log'"
+
+  计算统计:
+
+    ssh zhangyf9@42.228.13.241 "ssh bw22 'docker exec fzx_lingbot python3 /zhangyifan/robot/lingbot-vla-bench/parse_lingbot_step_times.py /zhangyifan/robot/lingbot-vla-bench/run_120steps.log --global-batch 64 --warmup 10'"
+
+
+九、文件位置索引
+================================================================================
+
+  容器内:
+    /workspace/lingbot-vla/                           # 项目根目录
+    /workspace/lingbot-vla/configs/vla/pusht.yaml     # 训练配置
+    /workspace/lingbot-vla/configs/robot_configs/pusht.yaml
+    /workspace/lingbot-vla/assets/norm_stats/pusht.json
+    /workspace/lingbot-vla/train.sh                   # 通用启动器
+    /workspace/lingbot-vla/lingbotvla/models/vla/pi0/flex_attention.py  # 已打补丁
+    /workspace/lingbot-vla/lingbotvla/data/vla_data/base_dataset.py     # 已打补丁
+    /workspace/models/lingbot-vla-4b-posttrain-robotwin/                # 模型权重
+    /workspace/models/Qwen2.5-VL-3B-Instruct/                          # Tokenizer
+    /workspace/datasets/pusht/                                         # 数据集
+
+  NFS (宿主机可访问):
+    /zhangyifan/robot/lingbot-vla-bench/              # 脚本 + 日志
+    /zhangyifan/robot/lingbot-vla-bench/benchmark_pusht.sh
+    /zhangyifan/robot/lingbot-vla-bench/parse_lingbot_step_times.py
+    /zhangyifan/robot/lingbot-vla-bench/run_120steps.log
+    /zhangyifan/robot/lingbot-vla-bench/run_120steps_logtxt.txt
+    /zhangyifan/robot/lingbot-vla-bench/pusht_test3.yaml  # 3步测试配置
+
+  备份文件:
+    /workspace/lingbot-vla/lingbotvla/models/vla/pi0/flex_attention.py.bak
+    /usr/local/lib/python3.10/dist-packages/torch/_inductor/kernel/flex/flex_attention.py.bak
+    /usr/local/lib/python3.10/dist-packages/torch/_inductor/kernel/flex/flex_attention.py.bak2
+    /usr/local/lib/python3.10/dist-packages/torch/_inductor/kernel/flex/flex_attention.py.bak3
+    /usr/local/lib/python3.10/dist-packages/torch/_inductor/template_heuristics/triton.py.bak
+
+
+十、已知问题与注意事项
+================================================================================
+
+  1. 容器 overlay 100% 满 (3.5T):
+     - 无法 pip install 或写入新文件
+     - 新文件用 /zhangyifan/ (NFS) + 符号链接解决
+     - 可清理: triton (3.5G), aiter (2.8G), mooncake (583M), lightop (484M)
+
+  2. PYTORCH_HIP_ALLOC_CONF 已弃用:
+     - DTK 2.9.0 提示: use PYTORCH_ALLOC_CONF instead
+     - 功能不受影响，可忽略
+
+  3. 首次编译开销:
+     - torch.compile 首次运行需 ~2 分钟 autotune
+     - 24 个配置/kernel shape 编译
+     - 后续 step 缓存复用，无额外开销
+
+  4. Checkpoint 保存 spike:
+     - 每 20 步左右有一次 ~3s 的 spike (checkpoint 保存)
+     - 正常现象，不影响稳态性能
+
+  5. inductor 补丁是改 torch 包内部:
+     - pip upgrade 会覆盖
+     - 当前容器不会升级 torch，风险可控
+     - 如需升级，需重新打 Patch 3
+
+  6. 运行推理服务:
+     docker exec -d fzx_lingbot bash -lc '
+     cd /workspace/lingbot-vla
+     export HF_ENDPOINT=https://hf-mirror.com
+     export QWEN25_PATH=/workspace/models/Qwen2.5-VL-3B-Instruct
+     export HIP_VISIBLE_DEVICES=0
+     python -m deploy.lingbot_vla_policy \
+       --model_path /workspace/models/lingbot-vla-4b-posttrain-robotwin \
+       --use_length 50 --port 8006'
+
+================================================================================
+文档结束
+================================================================================

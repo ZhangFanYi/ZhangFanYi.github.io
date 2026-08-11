@@ -1,0 +1,124 @@
+From cd67df01abcdb331e51582c5cba9642374200315 Mon Sep 17 00:00:00 2001
+From: EmderYi <1042164240@qq.com>
+Date: Mon, 3 Aug 2026 11:21:30 +0800
+Subject: [PATCH 0/5] dreamzero: add DCU/DTK training optimizations
+
+本 patch 系列基于官方提交 ab790c1，提取并整理 DreamZero-VLA
+在 DCU/DTK 环境中的训练相关修改。
+
+共包含 5 个 commits，修改 7 个正式源码和配置文件。
+
+1. 缓存 flash_attention 的 cu_seqlens
+
+修改文件：
+- groot/vla/model/dreamzero/modules/wan2_1_attention.py
+
+官方版本在每个 batch 大小和序列长度的组合上，每次都从 Python list
+构造 int32 的 cu_seqlens 张量，再传给 flash attention kernel。
+
+修改后增加 _get_uniform_cu_seqlens 缓存，按 (device, batch_size,
+sequence_length) 为 key 复用同一张量，避免每个训练 step 上千次
+同步 H2D 拷贝和临时张量分配。
+
+对于非均匀路径，改为 zeros 前缀 + cumsum 构造，去掉冗余的
+.to(torch.int32) 转换。
+
+2. 合并 causal attention 的 block 处理
+
+修改文件：
+- groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py
+
+主要修改包括：
+
+- _process_state_blocks：state block 只做块内 self-attention，官方
+  版本逐 block 循环调用 attention；修改后把 block 维度折叠进 batch
+  维度，一次 batched call 处理所有 block。
+- _process_noisy_image_blocks 与 _process_noisy_action_blocks 合并为
+  _process_noisy_image_action_blocks：同一 block 索引下，noisy image
+  和 noisy action query 共享同一份 K/V context，一次 attention 调用
+  后按 image_query_length 拆分输出，attention 调用次数减半。
+- 删除 forward 中的 roped_query/roped_key 列表累积与拼接，直接对
+  roped context/noisy 张量做切片。
+
+3. VAE 使用 channels_last_3d 内存布局
+
+修改文件：
+- groot/vla/model/dreamzero/modules/wan_video_vae.py
+
+将 video encode 输入张量以及所有 Conv3d/ConvTranspose3d 模块设为
+torch.channels_last_3d，即 DCU/ROCm 上卷积更优的 NHWC 布局。
+
+4. 使用融合 AdamW 优化器
+
+修改文件：
+- groot/vla/configs/conf.yaml
+
+默认优化器由 adamw_torch 调整为 adamw_torch_fused，减少 optimizer
+step 的 kernel 启动开销。
+
+5. 增加 DCU 训练环境与启动封装
+
+修改文件：
+- env_dz_bf16_100_xyz.sh
+- run_dz_bf16_100_xyz.sh
+- scripts/train/droid_training_wan22.sh
+
+主要修改包括：
+
+- 新增 env_dz_bf16_100_xyz.sh，设置 DREAMZERO_ROOT、数据/模型/
+  tokenizer/VAE 路径以及 8 卡 DCU 运行时选项（MIOPEN 等）；
+- 新增 run_dz_bf16_100_xyz.sh，封装 LoRA post-train 启动命令，
+  以 Hydra overrides 传入训练超参数；
+- droid_training_wan22.sh 追加 "$@"，使上层脚本的 Hydra 参数可以
+  覆盖脚本内的默认值。
+
+运行环境：
+
+- 基础镜像：torch2.9-dtk2604（DCU）
+- 加速设备：DCU-3G
+- 训练卡数：8
+
+启动命令：
+
+bash run_dz_bf16_100_xyz.sh
+
+未纳入 patch 的内容：
+
+- baseline_logs/ 下的运行日志和 timing JSON
+- dreamzero-xyz.tar.gz（空文件）
+- 训练输出的 checkpoints
+- 性能分析数据
+
+已包含验证：
+
+- 对比官方基线 ab790c1 逐文件 diff 确认改动范围
+- 5 个 commits 均可在官方基线干净应用（git am）
+
+待完成验证：
+
+- torch2.9-dtk2604 容器内的 8 卡启动验证
+- 优化前后的训练性能对比
+- FlashAttention cu_seqlens 缓存的功能等价性验证
+
+EmderYi (5):
+  perf(attention): cache cu_seqlens in flash_attention
+  perf(causal-attention): fold blocks into batch and share KV between
+    image and action queries
+  perf(vae): use channels_last_3d memory format for video encode
+  chore(config): use fused AdamW optimizer
+  chore(script): add DCU training environment and launch wrapper
+
+ env_dz_bf16_100_xyz.sh                        |  17 ++
+ groot/vla/configs/conf.yaml                   |   2 +-
+ .../dreamzero/modules/wan2_1_attention.py     |  34 ++-
+ .../wan_video_dit_action_casual_chunk.py      | 198 ++++++------------
+ .../model/dreamzero/modules/wan_video_vae.py  |   6 +-
+ run_dz_bf16_100_xyz.sh                        |  50 +++++
+ scripts/train/droid_training_wan22.sh         |   4 +-
+ 7 files changed, 164 insertions(+), 147 deletions(-)
+ create mode 100644 env_dz_bf16_100_xyz.sh
+ create mode 100755 run_dz_bf16_100_xyz.sh
+
+-- 
+2.39.5 (Apple Git-154)
+

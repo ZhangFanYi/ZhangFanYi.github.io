@@ -1,0 +1,30 @@
+From 9a9fe16acff6d7ccbda6333805567e2b4ce589a2 Mon Sep 17 00:00:00 2001
+From: wushw <wushw@rogon.cn>
+Date: Fri, 31 Jul 2026 13:09:23 +0800
+Subject: [PATCH 1/5] perf(fsdp): wrap model at transformer-block granularity
+
+---
+ wan_va/distributed/fsdp.py | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/wan_va/distributed/fsdp.py b/wan_va/distributed/fsdp.py
+index 44d1763..76cee27 100644
+--- a/wan_va/distributed/fsdp.py
++++ b/wan_va/distributed/fsdp.py
+@@ -26,9 +26,10 @@ def shard_model(model,
+     fsdp_config = {"mp_policy": mp_policy, "reshard_after_forward": True}
+ 
+     for block in model.blocks:
+-        fully_shard(block.attn1, **fsdp_config)
+-        fully_shard(block.attn2, **fsdp_config)
+-        fully_shard(block.ffn, **fsdp_config)
++        # Wrap at transformer-block granularity instead of wrapping
++        # attn1, attn2, and ffn separately. This reduces collective
++        # launch frequency and provides a larger compute window for
++        # communication prefetching.
+         fully_shard(block, **fsdp_config)
+ 
+     fully_shard(model, **fsdp_config)
+-- 
+2.31.1
+

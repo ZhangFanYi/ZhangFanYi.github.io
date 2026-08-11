@@ -1,0 +1,6 @@
+71b63ae77e6dda63502a66575b0a32c36387928c0f1920412c20098f77d38e75  0000-cover-letter.patch
+fba655626945c1a3155062f16e6c0efb47f8b0e71e4f90f6e3308a7d8d41a41e  0001-perf-deepspeed-normalize-bucket-sizes.patch
+bba5268ef94132ba42dd37a7782597a0ab564ec950dd11331d657f031147613b  0002-perf-config-disable-tf32.patch
+ced8dc0ef281d826eac092e30b1802b3f92cbda20928f742598588ab307a1696  0003-perf-config-add-profiling-and-fused-adamw.patch
+a6a0428bc490330cf338bb1dc9747cc9a8f0a60d9d16a5cf4a1a2b42e8c0cf22  0004-perf-experiment-compile-head-and-tune-profiler.patch
+842a9d92bb30e2a793ae489d4be903c9a497df3ab1458c5166ce396993f5f4ed  0005-perf-trainer-add-torch-profiler-integration.patch

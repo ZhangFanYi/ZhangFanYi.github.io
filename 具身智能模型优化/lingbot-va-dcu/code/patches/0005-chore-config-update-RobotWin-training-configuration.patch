@@ -1,0 +1,47 @@
+From e59f536c3fe476413117e7df89fe4b5f98552145 Mon Sep 17 00:00:00 2001
+From: wushw <wushw@rogon.cn>
+Date: Fri, 31 Jul 2026 14:02:01 +0800
+Subject: [PATCH 5/5] chore(config): update RobotWin training configuration
+
+---
+ wan_va/configs/va_robotwin_cfg.py       | 2 +-
+ wan_va/configs/va_robotwin_train_cfg.py | 6 ++++--
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/wan_va/configs/va_robotwin_cfg.py b/wan_va/configs/va_robotwin_cfg.py
+index 5fa703f..704868f 100644
+--- a/wan_va/configs/va_robotwin_cfg.py
++++ b/wan_va/configs/va_robotwin_cfg.py
+@@ -6,7 +6,7 @@ from .shared_config import va_shared_cfg
+ va_robotwin_cfg = EasyDict(__name__='Config: VA robotwin')
+ va_robotwin_cfg.update(va_shared_cfg)
+ 
+-va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/path/to/pretrained/model"
++va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/zhangyifan/robot/model"
+ 
+ va_robotwin_cfg.attn_window = 72
+ va_robotwin_cfg.frame_chunk_size = 2
+diff --git a/wan_va/configs/va_robotwin_train_cfg.py b/wan_va/configs/va_robotwin_train_cfg.py
+index a82c53d..e036b67 100644
+--- a/wan_va/configs/va_robotwin_train_cfg.py
++++ b/wan_va/configs/va_robotwin_train_cfg.py
+@@ -6,7 +6,7 @@ import os
+ va_robotwin_train_cfg = EasyDict(__name__='Config: VA robotwin train')
+ va_robotwin_train_cfg.update(va_robotwin_cfg)
+ 
+-va_robotwin_train_cfg.dataset_path = '/path/to/your/dataset'
++va_robotwin_train_cfg.dataset_path = '/zhangyifan/robot/data/robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000'
+ va_robotwin_train_cfg.empty_emb_path = os.path.join(va_robotwin_train_cfg.dataset_path, 'empty_emb.pt')
+ va_robotwin_train_cfg.enable_wandb = True
+ va_robotwin_train_cfg.load_worker = 16
+@@ -22,4 +22,6 @@ va_robotwin_train_cfg.weight_decay = 0.1
+ va_robotwin_train_cfg.warmup_steps = 10
+ va_robotwin_train_cfg.batch_size = 1 
+ va_robotwin_train_cfg.gradient_accumulation_steps = 1
+-va_robotwin_train_cfg.num_steps = 50000 
++va_robotwin_train_cfg.num_steps = 50000
++va_robotwin_train_cfg.enable_flash_attn = False
++va_robotwin_train_cfg.enable_wandb = False
+-- 
+2.31.1
+

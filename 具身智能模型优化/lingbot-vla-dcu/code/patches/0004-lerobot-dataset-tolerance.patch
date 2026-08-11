@@ -1,0 +1,22 @@
+diff --git a/src/lerobot/configs/default.py b/src/lerobot/configs/default.py
+--- a/src/lerobot/configs/default.py
++++ b/src/lerobot/configs/default.py
+@@ -31,6 +31,7 @@ class DatasetConfig:
+     revision: str | None = None
+     use_imagenet_stats: bool = True
+     video_backend: str = field(default_factory=get_safe_default_codec)
++    tolerance_s: float = 1e-4
+     streaming: bool = False
+ 
+ 
+diff --git a/src/lerobot/datasets/factory.py b/src/lerobot/datasets/factory.py
+--- a/src/lerobot/datasets/factory.py
++++ b/src/lerobot/datasets/factory.py
+@@ -98,6 +98,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatase
+                 image_transforms=image_transforms,
+                 revision=cfg.dataset.revision,
+                 video_backend=cfg.dataset.video_backend,
++                tolerance_s=cfg.dataset.tolerance_s,
+             )
+         else:
+             dataset = StreamingLeRobotDataset(

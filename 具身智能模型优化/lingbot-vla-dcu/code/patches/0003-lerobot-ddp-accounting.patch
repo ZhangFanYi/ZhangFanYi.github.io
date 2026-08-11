@@ -1,0 +1,14 @@
+diff --git a/src/lerobot/scripts/lerobot_train.py b/src/lerobot/scripts/lerobot_train.py
+--- a/src/lerobot/scripts/lerobot_train.py
++++ b/src/lerobot/scripts/lerobot_train.py
+@@ -319,8 +319,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator):
+         dataset.num_frames,
+         dataset.num_episodes,
+         train_metrics,
+         initial_step=step,
+-        accelerator=accelerator,
++        # effective_batch_size already includes accelerator.num_processes.
++        # Passing accelerator here would multiply the sample count twice.
+     )
+ 
+     if is_main_process:

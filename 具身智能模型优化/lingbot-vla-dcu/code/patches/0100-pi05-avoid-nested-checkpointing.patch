@@ -1,0 +1,29 @@
+diff --git a/src/lerobot/policies/pi05/modeling_pi05.py b/src/lerobot/policies/pi05/modeling_pi05.py
+--- a/src/lerobot/policies/pi05/modeling_pi05.py
++++ b/src/lerobot/policies/pi05/modeling_pi05.py
+@@ -611,7 +611,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
+             def image_embed_func(img):
+                 return self.paligemma_with_expert.embed_image(img)
+ 
+-            img_emb = self._apply_checkpoint(image_embed_func, img)
++            # The vision tower already checkpoints its transformer layers when
++            # gradient checkpointing is enabled. Avoid checkpointing the whole
++            # tower a second time, which otherwise repeats the full tower.
++            img_emb = image_embed_func(img)
+             bsize, num_img_embs = img_emb.shape[:2]
+ 
+             embs.append(img_emb)
+@@ -728,9 +731,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
+             )
+             return suffix_out
+ 
+-        suffix_out = self._apply_checkpoint(
+-            forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+-        )
++        # PaliGemmaWithExpertModel already checkpoints every transformer layer.
++        # A second checkpoint around the complete stack causes nested
++        # recomputation without providing the intended per-layer memory bound.
++        suffix_out = forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond)
+ 
+         suffix_out = suffix_out[:, -self.config.chunk_size :]
+         suffix_out = suffix_out.to(dtype=torch.float32)

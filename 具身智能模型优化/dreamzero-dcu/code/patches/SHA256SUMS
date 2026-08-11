@@ -1,0 +1,6 @@
+29e98246a1096d9e0926755284976a2f27d27f55eb557b1ed17b6831ebfe2ba6  0000-cover-letter.patch
+b3e7598d215538c2fadbc3ff3a461472c0a7597f15805d07926c1936755369f6  0001-perf-attention-cache-cu_seqlens-in-flash_attention.patch
+d2d624bc70cb62b9dbc40b6e9fa580940063e95ddaa9ab6f5d121c7235871429  0002-perf-causal-attention-fold-blocks-into-batch-and-sha.patch
+3ed9276c21716d875202c48f2172ce314b007d4a634086fe1930be0be102a997  0003-perf-vae-use-channels_last_3d-memory-format-for-vide.patch
+49297faf48e341918aa3decd5a678e3830c36af324f820893f484846b4d35f62  0004-chore-config-use-fused-AdamW-optimizer.patch
+6910818f9a5e81be262cc571d66da18a470382aae570a16dc552f7504f7ba802  0005-chore-script-add-DCU-training-environment-and-launch.patch

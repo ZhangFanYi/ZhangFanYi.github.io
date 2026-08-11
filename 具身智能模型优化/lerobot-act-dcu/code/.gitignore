@@ -1,0 +1,4 @@
+lerobot/tests/artifacts/**/*.safetensors
+lerobot/tests/artifacts/**/*.mp4
+lerobot/tests/artifacts/**/*.bag
+lerobot/tests/artifacts/cameras/*.png

@@ -1,0 +1,325 @@
+From 6e8d2678762e019cd375e90acb73d0a371e67127 Mon Sep 17 00:00:00 2001
+From: EmderYi <1042164240@qq.com>
+Date: Mon, 3 Aug 2026 11:21:24 +0800
+Subject: [PATCH 2/5] perf(causal-attention): fold blocks into batch and share
+ KV between image and action queries
+
+State blocks attend only to themselves, so fold the block dimension
+into the batch dimension and process all blocks with a single batched
+attention call instead of a loop.
+
+Noisy image and action blocks for the same block index share the same
+K/V context; process them in one attention call and split the output by
+the image query length. This halves the number of attention calls
+previously issued separately for image and action queries.
+
+Drop the roped_query/roped_key list accumulation and single cat, slicing
+the roped context/noisy tensors directly.
+---
+ .../wan_video_dit_action_casual_chunk.py      | 198 ++++++------------
+ 1 file changed, 59 insertions(+), 139 deletions(-)
+
+diff --git a/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py b/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py
+index c5e2528..daaf09d 100644
+--- a/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py
++++ b/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py
+@@ -626,66 +626,57 @@ class CausalWanSelfAttention(nn.Module):
+     def _process_state_blocks(self, state_q, state_k, state_v, state_horizon):
+         """Process state blocks: self-attention only - OPTIMIZED
+         
+-        OPTIMIZATION: State blocks only do self-attention within each block.
+-        Instead of looping, we can process all blocks in a single call with block-diagonal masking,
+-        or even simpler: just one attention call since they're independent.
++        State blocks are independent, so fold the block dimension into batch
++        and process all blocks with one attention call.
+         """
++        if state_horizon == 0:
++            return state_q
++
++        if state_horizon % self.num_state_per_block != 0:
++            raise ValueError(
++                "state_horizon must be divisible by num_state_per_block, "
++                f"got {state_horizon=} and num_state_per_block={self.num_state_per_block}"
++            )
++
+         num_blocks = state_horizon // self.num_state_per_block
+         
+         if num_blocks == 1:
+             # Single block - one attention call
+             return self.attn(state_q, state_k, state_v)
+         
+-        # OPTIMIZATION: Since each state block only attends to itself (no cross-block attention),
+-        # we can process all blocks in a single batched call. Flash attention will handle this
+-        # efficiently. The blocks are independent, so this is safe.
+-        # Alternative: reshape and process as separate batch items
+-        
+-        # Pre-allocate output
+-        output = torch.empty_like(state_q)
+-        
+-        # Process all blocks (keeping loop for now due to block-diagonal pattern)
+-        # This could be further optimized with custom masking
+-        for block_idx in range(num_blocks):
+-            state_block_start = block_idx * self.num_state_per_block
+-            state_block_end = state_block_start + self.num_state_per_block
+-            
+-            output[:, state_block_start:state_block_end] = self.attn(
+-                state_q[:, state_block_start:state_block_end],
+-                state_k[:, state_block_start:state_block_end],
+-                state_v[:, state_block_start:state_block_end]
+-            )
+-        
+-        return output
++        batch_size, _, num_heads, head_dim = state_q.shape
++        block_shape = (batch_size * num_blocks, self.num_state_per_block, num_heads, head_dim)
++
++        q_blocks = state_q.reshape(block_shape)
++        k_blocks = state_k.reshape(block_shape)
++        v_blocks = state_v.reshape(block_shape)
++        output = self.attn(q_blocks, k_blocks, v_blocks)
++        return output.reshape(batch_size, state_horizon, num_heads, head_dim)
+     
+-    def _process_noisy_image_blocks(self, noisy_image_q, noisy_image_k, noisy_image_v,
+-                                     clean_image_k, clean_image_v,
+-                                     noisy_action_k, noisy_action_v, noisy_state_k, noisy_state_v,
+-                                     half_frames, action_horizon, state_horizon):
+-        """Process noisy image blocks with teacher forcing pattern - OPTIMIZED
+-        
+-        First frame: conditioning, cannot attend to anything (self-attention only)
+-        Block i: attends to action[i] + state[i] + first_clean_frame + clean_blocks[0:i] + current_noisy_block
+-        
+-        OPTIMIZATION: Pre-allocate output, pre-compute indices, reduce memory allocations
+-        """
++    def _process_noisy_image_action_blocks(self, noisy_image_q, noisy_image_k, noisy_image_v,
++                                           noisy_action_q, noisy_action_k, noisy_action_v,
++                                           clean_image_k, clean_image_v,
++                                           noisy_state_k, noisy_state_v,
++                                           half_frames):
++        """Process noisy image and action blocks with their shared K/V context."""
+         block_size = self.frame_seqlen * self.num_frame_per_block
+         num_blocks = (half_frames - 1) // self.num_frame_per_block
+         
+-        # Pre-allocate output tensor
+-        output = torch.empty_like(noisy_image_q)
++        # Pre-allocate output tensors
++        image_output = torch.empty_like(noisy_image_q)
++        action_output = torch.empty_like(noisy_action_q)
+         
+         # First noisy frame: conditioning, self-attention only
+-        output[:, :self.frame_seqlen] = self.attn(
++        image_output[:, :self.frame_seqlen] = self.attn(
+             noisy_image_q[:, :self.frame_seqlen],
+             noisy_image_k[:, :self.frame_seqlen],
+             noisy_image_v[:, :self.frame_seqlen]
+         )
+         
+         if num_blocks == 0:
+-            return output
++            return image_output, action_output
+         
+-        # Pre-compute all block indices to reduce loop overhead
++        # Pre-compute all block indices
+         noisy_block_starts = [self.frame_seqlen + i * block_size for i in range(num_blocks)]
+         noisy_block_ends = [min(start + block_size, noisy_image_q.shape[1]) for start in noisy_block_starts]
+         clean_context_ends = [self.frame_seqlen + i * block_size for i in range(num_blocks)]
+@@ -694,7 +685,7 @@ class CausalWanSelfAttention(nn.Module):
+         state_block_starts = [i * self.num_state_per_block for i in range(num_blocks)]
+         state_block_ends = [start + self.num_state_per_block for start in state_block_starts]
+         
+-        # Process noisy image blocks
++        # Image and action queries use the same K/V context for each block
+         for block_idx in range(num_blocks):
+             noisy_start = noisy_block_starts[block_idx]
+             noisy_end = noisy_block_ends[block_idx]
+@@ -704,9 +695,11 @@ class CausalWanSelfAttention(nn.Module):
+             state_start = state_block_starts[block_idx]
+             state_end = state_block_ends[block_idx]
+             
+-            q_block = noisy_image_q[:, noisy_start:noisy_end]
+-            
+-            # Build context: first_clean_frame + clean_blocks[0:i] + current_noisy_block + action[i] + state[i]
++            image_query_length = noisy_end - noisy_start
++            q_block = torch.cat([
++                noisy_image_q[:, noisy_start:noisy_end],
++                noisy_action_q[:, action_start:action_end]
++            ], dim=1)
+             k_context = torch.cat([
+                 clean_image_k[:, :clean_end],
+                 noisy_image_k[:, noisy_start:noisy_end],
+@@ -720,68 +713,11 @@ class CausalWanSelfAttention(nn.Module):
+                 noisy_state_v[:, state_start:state_end]
+             ], dim=1)
+             
+-            output[:, noisy_start:noisy_end] = self.attn(q_block, k_context, v_context)
+-        
+-        return output
+-    
+-    def _process_noisy_action_blocks(self, noisy_action_q, noisy_action_k, noisy_action_v,
+-                                      clean_image_k, clean_image_v,
+-                                      noisy_image_k, noisy_image_v,
+-                                      noisy_state_k, noisy_state_v,
+-                                      half_frames, action_horizon, state_horizon):
+-        """Process noisy action blocks with teacher forcing pattern - OPTIMIZED
++            block_output = self.attn(q_block, k_context, v_context)
++            image_output[:, noisy_start:noisy_end] = block_output[:, :image_query_length]
++            action_output[:, action_start:action_end] = block_output[:, image_query_length:]
+         
+-        First action (for first frame): cannot attend to anything (self-attention only)
+-        Action block i: attends to first_clean_frame + clean_blocks[0:i] + noisy_image[i] + action[i] + state[i]
+-        
+-        OPTIMIZATION: Pre-allocate output, pre-compute indices, reduce memory allocations
+-        """
+-        num_blocks = (half_frames - 1) // self.num_frame_per_block
+-        
+-        if num_blocks == 0:
+-            return torch.empty_like(noisy_action_q)
+-        
+-        # Pre-allocate output tensor
+-        output = torch.empty_like(noisy_action_q)
+-        
+-        # Pre-compute all block indices
+-        action_block_starts = [i * self.num_action_per_block for i in range(num_blocks)]
+-        action_block_ends = [start + self.num_action_per_block for start in action_block_starts]
+-        clean_context_ends = [self.frame_seqlen + i * self.frame_seqlen * self.num_frame_per_block for i in range(num_blocks)]
+-        noisy_image_block_starts = [self.frame_seqlen + i * self.frame_seqlen * self.num_frame_per_block for i in range(num_blocks)]
+-        noisy_image_block_ends = [start + self.frame_seqlen * self.num_frame_per_block for start in noisy_image_block_starts]
+-        state_block_starts = [i * self.num_state_per_block for i in range(num_blocks)]
+-        state_block_ends = [start + self.num_state_per_block for start in state_block_starts]
+-        
+-        # Process noisy action blocks
+-        for block_idx in range(num_blocks):
+-            action_start = action_block_starts[block_idx]
+-            action_end = action_block_ends[block_idx]
+-            clean_end = clean_context_ends[block_idx]
+-            noisy_img_start = noisy_image_block_starts[block_idx]
+-            noisy_img_end = noisy_image_block_ends[block_idx]
+-            state_start = state_block_starts[block_idx]
+-            state_end = state_block_ends[block_idx]
+-            
+-            q_block = noisy_action_q[:, action_start:action_end]
+-            
+-            # Build context: first_clean_frame + clean_blocks[0:i] + noisy_image[i] + action[i] + state[i]
+-            k_context = torch.cat([
+-                clean_image_k[:, :clean_end],
+-                noisy_image_k[:, noisy_img_start:noisy_img_end],
+-                noisy_action_k[:, action_start:action_end],
+-                noisy_state_k[:, state_start:state_end]
+-            ], dim=1)
+-            v_context = torch.cat([
+-                clean_image_v[:, :clean_end],
+-                noisy_image_v[:, noisy_img_start:noisy_img_end],
+-                noisy_action_v[:, action_start:action_end],
+-                noisy_state_v[:, state_start:state_end]
+-            ], dim=1)
+-            
+-            output[:, action_start:action_end] = self.attn(q_block, k_context, v_context)
+-        
+-        return output
++        return image_output, action_output
+ 
+     def forward(
+         self,
+@@ -826,9 +762,6 @@ class CausalWanSelfAttention(nn.Module):
+                     k_context = k[:, :s//2]
+                     q_noisy = q[:, s//2:]
+                     k_noisy = k[:, s//2:]
+-                roped_query = []
+-                roped_key = []
+-
+                 # rope should be same for clean and noisy parts
+                 rq_context = rope_action_apply(
+                     x=q_context,
+@@ -864,13 +797,6 @@ class CausalWanSelfAttention(nn.Module):
+                     num_state_per_block=self.num_state_per_block,
+                 ).type_as(v)
+ 
+-                roped_query.append(rq_context)
+-                roped_key.append(rk_context)
+-                roped_query.append(rq_noisy)
+-                roped_key.append(rk_noisy)
+-
+-                roped_query = torch.cat(roped_query, dim=1)
+-                roped_key = torch.cat(roped_key, dim=1)
+                 # Calculate sequence dimensions
+                 half_seq_len = (s - (action_register_length if action_register_length is not None else 0)) // 2
+                 
+@@ -892,7 +818,8 @@ class CausalWanSelfAttention(nn.Module):
+                     state_horizon = num_image_blocks * self.num_state_per_block
+                     
+                     # Block layout must match actual register length. For 5B use 320x176 so latent frame_seqlen=55.
+-                    if roped_query.shape[1] != half_seq_len + noisy_image_seq_len + action_horizon + state_horizon:
++                    roped_sequence_length = rq_context.shape[1] + rq_noisy.shape[1]
++                    if roped_sequence_length != half_seq_len + noisy_image_seq_len + action_horizon + state_horizon:
+                         raise ValueError(
+                             "Sequence length does not match block layout. "
+                             "For 5B use 320x176 (e.g. data=dreamzero/droid_relative_wan22 or image_resolution_width=320, image_resolution_height=176). "
+@@ -904,18 +831,18 @@ class CausalWanSelfAttention(nn.Module):
+                     
+                     # Split clean and noisy parts
+                     # Clean: [image tokens only]
+-                    clean_image_q = roped_query[:, :clean_image_seq_len]
+-                    clean_image_k = roped_key[:, :clean_image_seq_len]
++                    clean_image_q = rq_context
++                    clean_image_k = rk_context
+                     clean_image_v = v[:, :clean_image_seq_len]
+ 
+                     # Noisy: [image tokens][action tokens][state tokens]
+-                    noisy_image_q = roped_query[:, half_seq_len:half_seq_len + noisy_image_seq_len]
+-                    noisy_action_q = roped_query[:, half_seq_len + noisy_image_seq_len:half_seq_len + noisy_image_seq_len + action_horizon]
+-                    noisy_state_q = roped_query[:, half_seq_len + noisy_image_seq_len + action_horizon:]
++                    noisy_image_q = rq_noisy[:, :noisy_image_seq_len]
++                    noisy_action_q = rq_noisy[:, noisy_image_seq_len:noisy_image_seq_len + action_horizon]
++                    noisy_state_q = rq_noisy[:, noisy_image_seq_len + action_horizon:]
+                     
+-                    noisy_image_k = roped_key[:, half_seq_len:half_seq_len + noisy_image_seq_len]
+-                    noisy_action_k = roped_key[:, half_seq_len + noisy_image_seq_len:half_seq_len + noisy_image_seq_len + action_horizon]
+-                    noisy_state_k = roped_key[:, half_seq_len + noisy_image_seq_len + action_horizon:]
++                    noisy_image_k = rk_noisy[:, :noisy_image_seq_len]
++                    noisy_action_k = rk_noisy[:, noisy_image_seq_len:noisy_image_seq_len + action_horizon]
++                    noisy_state_k = rk_noisy[:, noisy_image_seq_len + action_horizon:]
+                     
+                     noisy_image_v = v[:, half_seq_len:half_seq_len + noisy_image_seq_len]
+                     noisy_action_v = v[:, half_seq_len + noisy_image_seq_len:half_seq_len + noisy_image_seq_len + action_horizon]
+@@ -927,20 +854,13 @@ class CausalWanSelfAttention(nn.Module):
+                         clean_image_q, clean_image_k, clean_image_v, clean_frames)
+                     
+                     # ========== Process NOISY tokens ==========
+-                    # Noisy image blocks: attend to previous clean image blocks + current noisy image + current noisy action + current noisy state
+-                    noisy_image_outputs = self._process_noisy_image_blocks(
++                    # Noisy image/action queries share the same K/V context per block
++                    noisy_image_outputs, noisy_action_outputs = self._process_noisy_image_action_blocks(
+                         noisy_image_q, noisy_image_k, noisy_image_v,
+-                        clean_image_k, clean_image_v,
+-                        noisy_action_k, noisy_action_v, noisy_state_k, noisy_state_v,
+-                        noisy_frames, action_horizon, state_horizon)
+-                    
+-                    # Noisy action blocks: attend to previous clean image blocks (including first) + current noisy image + current noisy action + same state
+-                    noisy_action_outputs = self._process_noisy_action_blocks(
+                         noisy_action_q, noisy_action_k, noisy_action_v,
+-                        clean_image_k, clean_image_v, 
+-                        noisy_image_k, noisy_image_v,
++                        clean_image_k, clean_image_v,
+                         noisy_state_k, noisy_state_v,
+-                        noisy_frames, action_horizon, state_horizon)
++                        noisy_frames)
+                     
+                     # Noisy state blocks: self-attention only
+                     noisy_state_outputs = self._process_state_blocks(
+@@ -954,11 +874,11 @@ class CausalWanSelfAttention(nn.Module):
+                 else:
+                     # No action/state tokens, fall back to simple image-only teacher forcing
+                     half_frames = half_seq_len // self.frame_seqlen
+-                    clean_q = roped_query[:, :half_seq_len]
+-                    clean_k = roped_key[:, :half_seq_len]
++                    clean_q = rq_context
++                    clean_k = rk_context
+                     clean_v = v[:, :half_seq_len]
+-                    noisy_q = roped_query[:, half_seq_len:]
+-                    noisy_k = roped_key[:, half_seq_len:]
++                    noisy_q = rq_noisy
++                    noisy_k = rk_noisy
+                     noisy_v = v[:, half_seq_len:]
+                     
+                     # Process clean frames with blockwise causal attention
+-- 
+2.39.5 (Apple Git-154)
+

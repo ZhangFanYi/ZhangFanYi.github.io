@@ -1,0 +1,61 @@
+ARG BASE_IMAGE=harbor.sourcefind.cn:5443/dcu/admin/base/custom:vllm-0.18.1-ubuntu22.04-dtk2604-py3.12-20260706-0920-faopt-fix
+FROM ${BASE_IMAGE}
+
+ARG ENABLE_OPTIMIZATION=1
+ARG PIP_INDEX_URL=https://download.sourcefind.cn:65024/4/main
+ARG PIP_FALLBACK_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+ENV HF_ENDPOINT=https://hf-mirror.com \
+    TOKENIZERS_PARALLELISM=false \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl ffmpeg git libavcodec-dev libavformat-dev libavutil-dev \
+      libavdevice-dev libswscale-dev libswresample-dev patch \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY lerobot /workspace/lerobot
+COPY patches /opt/lerobot-act-patches
+
+RUN [[ "${ENABLE_OPTIMIZATION}" =~ ^[01]$ ]] \
+    || { echo "ENABLE_OPTIMIZATION must be 0 or 1"; exit 2; } \
+    && if [[ "${ENABLE_OPTIMIZATION}" == 1 ]]; then \
+         git -C /workspace/lerobot apply --check /opt/lerobot-act-patches/0100-act-dcu-training-optimization.patch; \
+         git -C /workspace/lerobot apply /opt/lerobot-act-patches/0100-act-dcu-training-optimization.patch; \
+       fi \
+    && { \
+         if [[ "${ENABLE_OPTIMIZATION}" == 1 ]]; then \
+           sha256sum /opt/lerobot-act-patches/0100-act-dcu-training-optimization.patch; \
+         fi; \
+       } > /opt/lerobot-act-patches/applied.sha256
+
+RUN python3 -c 'from importlib.metadata import version; print("\n".join(f"{name}=={version(name)}" for name in ("torch", "torchvision")))' \
+    > /opt/lerobot-act-torch.before
+
+RUN python3 -m pip install -i "${PIP_INDEX_URL}" -e "/workspace/lerobot[training]" \
+    || python3 -m pip install -i "${PIP_FALLBACK_INDEX_URL}" -e "/workspace/lerobot[training]"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+      libswscale-dev libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install -i "${PIP_INDEX_URL}" torchcodec==0.10.0 numpy==1.26.4 \
+    || python3 -m pip install -i "${PIP_FALLBACK_INDEX_URL}" torchcodec==0.10.0 numpy==1.26.4
+
+RUN python3 -c 'from importlib.metadata import version; print("\n".join(f"{name}=={version(name)}" for name in ("torch", "torchvision")))' \
+    > /opt/lerobot-act-torch.after \
+    && diff -u /opt/lerobot-act-torch.before /opt/lerobot-act-torch.after
+
+RUN mkdir -p /workspace/lerobot-act
+COPY datadown.sh /workspace/lerobot-act/datadown.sh
+COPY start_act.sh /workspace/lerobot-act/start_act.sh
+
+RUN chmod +x /workspace/lerobot-act/datadown.sh /workspace/lerobot-act/start_act.sh \
+    && python3 -m pip freeze > /opt/lerobot-act-pip-freeze.txt
+
+WORKDIR /workspace/lerobot
+CMD ["/bin/bash"]

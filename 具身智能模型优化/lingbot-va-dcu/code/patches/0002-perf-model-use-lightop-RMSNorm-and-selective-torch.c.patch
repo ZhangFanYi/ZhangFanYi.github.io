@@ -1,0 +1,166 @@
+From ca8f6c42c47b9d395e65a2d32a4875d556cad9a5 Mon Sep 17 00:00:00 2001
+From: wushw <wushw@rogon.cn>
+Date: Fri, 31 Jul 2026 13:18:22 +0800
+Subject: [PATCH 2/5] perf(model): use lightop RMSNorm and selective
+ torch.compile
+
+Use the DCU-optimized lightop RMSNorm implementation and optionally compile rotary, attention-input, and residual operations through COMPILE_BLOCK_OPS.
+---
+ wan_va/modules/model.py | 92 ++++++++++++++++++++++++++++-------------
+ 1 file changed, 63 insertions(+), 29 deletions(-)
+
+diff --git a/wan_va/modules/model.py b/wan_va/modules/model.py
+index 25b45e5..037b1c9 100644
+--- a/wan_va/modules/model.py
++++ b/wan_va/modules/model.py
+@@ -1,8 +1,10 @@
+ # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
+ import math
++import os
+ from copy import deepcopy
+ 
+ import torch
++import lightop
+ import torch.nn as nn
+ import torch.nn.functional as F
+ from diffusers.configuration_utils import ConfigMixin, register_to_config
+@@ -322,14 +324,20 @@ class WanAttention(torch.nn.Module):
+             torch.nn.Linear(self.inner_dim, dim, bias=True),
+             torch.nn.Dropout(dropout),
+         ])
+-        self.norm_q = torch.nn.RMSNorm(dim_head * heads,
+-                                       eps=eps,
+-                                       elementwise_affine=True)
+-        self.norm_k = torch.nn.RMSNorm(dim_head * heads,
+-                                       eps=eps,
+-                                       elementwise_affine=True)
++        self.norm_q = lightop.RMSNorm(dim_head * heads, eps=eps)
++        self.norm_k = lightop.RMSNorm(dim_head * heads, eps=eps)
+         self.attn_caches = {} if cross_attention_dim_head is None else None
+ 
++        if os.getenv("COMPILE_BLOCK_OPS", "0") == "1":
++            self._apply_rotary_emb = torch.compile(self._apply_rotary_emb, dynamic=True)
++
++    def _apply_rotary_emb(self, x, freqs):
++        x_out = torch.view_as_complex(
++            x.to(torch.float64).reshape(x.shape[0], x.shape[1],
++                                        x.shape[2], -1, 2))
++        x_out = torch.view_as_real(x_out * freqs).flatten(3)
++        return x_out.to(x.dtype)
++
+     def clear_pred_cache(self, cache_name):
+         if self.attn_caches is None:
+             return
+@@ -430,15 +438,8 @@ class WanAttention(torch.nn.Module):
+         key = key.unflatten(2, (self.heads, -1))
+         value = value.unflatten(2, (self.heads, -1))
+         if rotary_emb is not None:
+-
+-            def apply_rotary_emb(x, freqs):
+-                x_out = torch.view_as_complex(
+-                    x.to(torch.float64).reshape(x.shape[0], x.shape[1],
+-                                                x.shape[2], -1, 2))
+-                x_out = torch.view_as_real(x_out * freqs).flatten(3)
+-                return x_out.to(x.dtype)
+-            query = apply_rotary_emb(query, rotary_emb)
+-            key = apply_rotary_emb(key, rotary_emb)
++            query = self._apply_rotary_emb(query, rotary_emb)
++            key = self._apply_rotary_emb(key, rotary_emb)
+         slots = None
+         if kv_cache is not None and kv_cache['k'] is not None:
+             slots = self.update_cache(cache_name,
+@@ -512,15 +513,12 @@ class WanTransformerBlock(nn.Module):
+         self.scale_shift_table = nn.Parameter(
+             torch.randn(1, 6, dim) / dim**0.5)
+ 
+-    def forward(
+-        self,
+-        hidden_states,
+-        encoder_hidden_states,
+-        temb,
+-        rotary_emb,
+-        update_cache=0,
+-        cache_name='pos',
+-    ) -> torch.Tensor:
++        if os.getenv("COMPILE_BLOCK_OPS", "0") == "1":
++            self._attn1_input = torch.compile(self._attn1_input, dynamic=True)
++            self._attn2_input = torch.compile(self._attn2_input, dynamic=True)
++            self._ffn_residual = torch.compile(self._ffn_residual, dynamic=True)
++
++    def _attn1_input(self, hidden_states, temb):
+         temb_scale_shift_table = self.scale_shift_table[None] + temb.float()
+         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = \
+             rearrange(temb_scale_shift_table, 'b l n c -> b n l c').chunk(6, dim=1)
+@@ -530,10 +528,48 @@ class WanTransformerBlock(nn.Module):
+         c_shift_msa = c_shift_msa.squeeze(1)
+         c_scale_msa = c_scale_msa.squeeze(1)
+         c_gate_msa = c_gate_msa.squeeze(1)
+-        # 1. Self-attention
+         norm_hidden_states = (self.norm1(hidden_states.float()) *
+                               (1. + scale_msa) +
+                               shift_msa).type_as(hidden_states)
++        return norm_hidden_states, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa
++
++    def _attn2_input(self, hidden_states):
++        return self.norm2(hidden_states.float()).type_as(hidden_states)
++
++    def _ffn_residual(self, hidden_states, ff_output, c_gate_msa):
++        return (hidden_states.float() +
++                ff_output.float() * c_gate_msa).type_as(hidden_states)
++
++    def forward(
++        self,
++        hidden_states,
++        encoder_hidden_states,
++        temb,
++        rotary_emb,
++        update_cache=0,
++        cache_name='pos',
++    ) -> torch.Tensor:
++        return self._forward_impl(
++            hidden_states,
++            encoder_hidden_states,
++            temb,
++            rotary_emb,
++            update_cache=update_cache,
++            cache_name=cache_name,
++        )
++
++    def _forward_impl(
++        self,
++        hidden_states,
++        encoder_hidden_states,
++        temb,
++        rotary_emb,
++        update_cache=0,
++        cache_name='pos',
++    ) -> torch.Tensor:
++        # 1. Self-attention
++        norm_hidden_states, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = \
++            self._attn1_input(hidden_states, temb)
+         attn_output = self.attn1(norm_hidden_states,
+                                  norm_hidden_states,
+                                  norm_hidden_states,
+@@ -544,8 +580,7 @@ class WanTransformerBlock(nn.Module):
+                          attn_output * gate_msa).type_as(hidden_states)
+ 
+         # 2. Cross-attention
+-        norm_hidden_states = self.norm2(
+-            hidden_states.float()).type_as(hidden_states)
++        norm_hidden_states = self._attn2_input(hidden_states)
+         attn_output = self.attn2(norm_hidden_states,
+                                  encoder_hidden_states,
+                                  encoder_hidden_states,
+@@ -561,8 +596,7 @@ class WanTransformerBlock(nn.Module):
+ 
+         ff_output = self.ffn(norm_hidden_states)
+ 
+-        hidden_states = (hidden_states.float() +
+-                         ff_output.float() * c_gate_msa).type_as(hidden_states)
++        hidden_states = self._ffn_residual(hidden_states, ff_output, c_gate_msa)
+         return hidden_states
+ 
+ 
+-- 
+2.31.1
+

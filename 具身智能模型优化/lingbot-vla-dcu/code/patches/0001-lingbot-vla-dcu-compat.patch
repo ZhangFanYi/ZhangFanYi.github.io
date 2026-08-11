@@ -1,0 +1,56 @@
+diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,11 +1,10 @@
+ ipdb
+-torchcodec==0.6.0
+ pytest
+-datasets==3.6.0
++datasets==4.1.1
+-transformers==4.51.3
++transformers==4.53.3
+ numpy==1.26.4
+ tensorboard==2.16.2
+ msgpack
+ websockets
+ matplotlib
+-numpydantic
+\ No newline at end of file
++numpydantic
+diff --git a/setup.py b/setup.py
+index e536fed..bc24ffc 100644
+--- a/setup.py
++++ b/setup.py
+@@ -46,9 +46,6 @@ def get_requires() -> List[str]:
+ BASE_REQUIRE = [
+     "torchdata>=0.8.0,<1.0",
+     "blobfile>=3.0.0",
+-    "torch==2.8.0",
+-    "torchvision==0.23.0",
+-    "torchaudio==2.8.0",
+ ]
+ 
+ def main():
+diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
+index 94ce3f1..74e9759 100644
+--- a/lingbotvla/data/vla_data/base_dataset.py
++++ b/lingbotvla/data/vla_data/base_dataset.py
+@@ -110,7 +110,7 @@ class VLADataset(Dataset):
+         config=PI0Config,
+         tokenizer=AutoTokenizer,
+         image_processor=None,
+-        video_backend = 'torchcodec',
++        video_backend = 'pyav',
+         chunk_size = 50,
+         image_size = (224, 224),
+         do_nomalize = True,
+@@ -145,7 +145,8 @@ class VLADataset(Dataset):
+             repo_id=repo_id,
+             image_transforms=Resize(image_size),
+             delta_timestamps=self.get_delta_timestamps(),
+-            load_image=load_image
++            load_image=load_image,
++            video_backend=video_backend,
+         )
+         
+         self.task_mapping = dict(zip(self.dataset_meta.tasks['task_index'], self.dataset_meta.tasks.index))

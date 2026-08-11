@@ -1,0 +1,25 @@
+From 000000000000000000000000d4abc452122a215e Mon Sep 17 00:00:00 2001
+From: zhangyf9 <zhangyf9@hygon.cn>
+Date: Mon, 3 Aug 2026 10:00:00 +0800
+Subject: [PATCH 2/5] perf(config): disable TF32 for finetuning
+
+Set tf32 to False in the training config for the DCU/DTK environment.
+---
+ gr00t__configs__training__training_config_py
+1 file changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/gr00t/configs/training/training_config.py b/gr00t/configs/training/training_config.py
+index f6f4101..826b8fc 100755
+--- a/gr00t/configs/training/training_config.py
++++ b/gr00t/configs/training/training_config.py
+@@ -58,7 +58,7 @@ class TrainingConfig:
+     skip_weight_loading: bool = False  # skip loading checkpoint weights (architecture only)
+ 
+     # Mixed precision
+-    tf32: bool = True
++    tf32: bool = False
+     fp16: bool = False
+     bf16: bool = True
+     eval_bf16: bool = True
+-- 
+2.31.1

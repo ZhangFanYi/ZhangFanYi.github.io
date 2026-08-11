@@ -1,0 +1,175 @@
+ARG BASE_IMAGE=harbor.sourcefind.cn:5443/dcu/admin/base/pytorch@sha256:07c285c51837d76fbcc73b771b1a95ecf2d8b71203e5feadb3cb9cb12b5d3f4d
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG PIP_INDEX_URL=https://download.sourcefind.cn:65024/4/main
+ARG PIP_FALLBACK_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG GITHUB_PROXY=https://gh-proxy.com/
+ARG LEROBOT_URL=https://github.com/huggingface/lerobot/archive/58f70b6bd370864139a3795ac3497a9eae8c42d5.tar.gz
+ARG LEROBOT_SHA256=5dbe73e4d35be0d13f1cb80daa16a7fdbd23601567518f010f860ff0847c41a3
+ARG LEROBOT_PROXY_SHA256=5dbe73e4d35be0d13f1cb80daa16a7fdbd23601567518f010f860ff0847c41a3
+ARG TRANSFORMERS_URL=https://github.com/huggingface/transformers/archive/dcddb970176382c0fcf4521b0c0e6fc15894dfe0.tar.gz
+ARG TRANSFORMERS_SHA256=17fc4f8acf241e60a75f65cec2c6a78cc4720f417a2d2e18cfda507800f4d90b
+ARG TRANSFORMERS_PROXY_SHA256=a48b3760625a6241a8914fdc66daf6f72728d36b1467f1dd32ca1959311ef142
+
+ENV HF_ENDPOINT=https://hf-mirror.com \
+    TOKENIZERS_PARALLELISM=false \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN [[ "${BASE_IMAGE}" =~ @sha256:[0-9a-fA-F]{64}$ ]] \
+    || { echo "BASE_IMAGE must use a sha256 digest"; exit 2; }
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl ffmpeg git libgl1 libglib2.0-0 patch \
+    && rm -rf /var/lib/apt/lists/*
+
+# pi0.5 lives in LeRobot. Download its two fixed source trees while building on
+# the server; neither tree nor any model/data artifact is downloaded to the Mac.
+RUN download_verified() { \
+      local source_url="$1" official_sha="$2" proxy_sha="$3" output="$4"; \
+      local mode candidate expected_sha; \
+      for mode in proxy official; do \
+        if [[ "${mode}" == proxy ]]; then \
+          candidate="${GITHUB_PROXY}${source_url}"; \
+          expected_sha="${proxy_sha}"; \
+        else \
+          candidate="${source_url}"; \
+          expected_sha="${official_sha}"; \
+        fi; \
+        echo "Downloading ${candidate}"; \
+        if curl -fL --retry 1 --retry-delay 2 --connect-timeout 20 \
+             --speed-limit 1024 --speed-time 30 --max-time 1800 \
+             "${candidate}" -o "${output}.partial" \
+          && echo "${expected_sha}  ${output}.partial" | sha256sum -c -; then \
+          mv "${output}.partial" "${output}"; \
+          return 0; \
+        fi; \
+        rm -f "${output}.partial"; \
+      done; \
+      echo "No verified download succeeded for ${source_url}" >&2; \
+      return 1; \
+    } \
+    && download_verified "${LEROBOT_URL}" "${LEROBOT_SHA256}" \
+         "${LEROBOT_PROXY_SHA256}" /tmp/lerobot.tar.gz \
+    && mkdir -p /workspace/lerobot \
+    && tar -xzf /tmp/lerobot.tar.gz --strip-components=1 -C /workspace/lerobot \
+    && download_verified "${TRANSFORMERS_URL}" "${TRANSFORMERS_SHA256}" \
+         "${TRANSFORMERS_PROXY_SHA256}" /tmp/transformers.tar.gz \
+    && mkdir -p /workspace/transformers-openpi \
+    && tar -xzf /tmp/transformers.tar.gz --strip-components=1 -C /workspace/transformers-openpi \
+    && rm -f /tmp/lerobot.tar.gz /tmp/transformers.tar.gz
+
+# BEVFormer-style delivery: the original project and patches are copied from
+# this directory. Keep both below remote downloads for efficient rebuilds.
+COPY lingbot-vla /workspace/lingbot-vla
+COPY patches /opt/lingbot-vla-patches
+
+RUN python - <<'PY'
+import json
+from importlib import metadata
+from pathlib import Path
+
+names = ("torch", "torchvision", "torchaudio", "triton", "flash-attn")
+versions = {}
+for name in names:
+    try:
+        versions[name] = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        versions[name] = None
+Path("/opt/accelerator-packages.before.json").write_text(
+    json.dumps(versions, indent=2, sort_keys=True) + "\n"
+)
+PY
+
+RUN python -m pip uninstall -y vllm cupy-cuda12x pygobject torchcodec || true \
+    && packages=( \
+      accelerate==1.13.0 av==15.1.0 cmake==4.1.3 datasets==4.1.1 \
+      blobfile==3.2.0 deepdiff==8.6.2 diffusers==0.35.2 \
+      draccus==0.10.0 einops==0.8.2 \
+      gymnasium==1.3.0 hf-transfer==0.1.9 huggingface-hub==0.35.3 \
+      imageio==2.37.3 imageio-ffmpeg==0.6.0 ipdb==0.13.13 jsonlines==4.0.0 \
+      numpy==1.26.4 opencv-python-headless==4.11.0.86 packaging==25.0 \
+      numpydantic==1.8.1 pandas==2.3.3 pillow==12.1.1 \
+      pyarrow==23.0.1 pycountry==24.6.1 \
+      pynput==1.8.2 pyserial==3.5 safetensors==0.7.0 \
+      sentencepiece==0.2.1 setuptools==79.0.1 tensorboard==2.16.2 \
+      termcolor==3.3.0 \
+      tokenizers==0.21.4 wandb==0.21.4 \
+    ) \
+    && if python -m pip install --dry-run -i "${PIP_INDEX_URL}" "${packages[@]}" >/dev/null 2>&1; then \
+         index="${PIP_INDEX_URL}"; \
+       else \
+         index="${PIP_FALLBACK_INDEX_URL}"; \
+       fi \
+    && python -m pip install -i "${index}" --upgrade-strategy only-if-needed "${packages[@]}"
+
+# Compatibility patches are mandatory and do not change the optimization A/B.
+RUN git -C /workspace/lingbot-vla apply --check /opt/lingbot-vla-patches/0001-lingbot-vla-dcu-compat.patch \
+    && git -C /workspace/lingbot-vla apply /opt/lingbot-vla-patches/0001-lingbot-vla-dcu-compat.patch \
+    && git -C /workspace/lerobot apply --check /opt/lingbot-vla-patches/0002-lerobot-dcu-dependencies.patch \
+    && git -C /workspace/lerobot apply /opt/lingbot-vla-patches/0002-lerobot-dcu-dependencies.patch \
+    && git -C /workspace/lerobot apply --check /opt/lingbot-vla-patches/0003-lerobot-ddp-accounting.patch \
+    && git -C /workspace/lerobot apply /opt/lingbot-vla-patches/0003-lerobot-ddp-accounting.patch \
+    && git -C /workspace/lerobot apply --check /opt/lingbot-vla-patches/0004-lerobot-dataset-tolerance.patch \
+    && git -C /workspace/lerobot apply /opt/lingbot-vla-patches/0004-lerobot-dataset-tolerance.patch
+
+# Keep this switch below source download and dependency installation so an A/B
+# rebuild only invalidates the final source/install layers.
+ARG ENABLE_OPTIMIZATION=1
+RUN [[ "${ENABLE_OPTIMIZATION}" =~ ^[01]$ ]] \
+    || { echo "ENABLE_OPTIMIZATION must be 0 or 1"; exit 2; } \
+    && if [[ "${ENABLE_OPTIMIZATION}" == 1 ]]; then \
+         git -C /workspace/lerobot apply --check /opt/lingbot-vla-patches/0100-pi05-avoid-nested-checkpointing.patch; \
+         git -C /workspace/lerobot apply /opt/lingbot-vla-patches/0100-pi05-avoid-nested-checkpointing.patch; \
+       fi \
+    && { \
+         sha256sum /opt/lingbot-vla-patches/0001-lingbot-vla-dcu-compat.patch; \
+         sha256sum /opt/lingbot-vla-patches/0002-lerobot-dcu-dependencies.patch; \
+         sha256sum /opt/lingbot-vla-patches/0003-lerobot-ddp-accounting.patch; \
+         sha256sum /opt/lingbot-vla-patches/0004-lerobot-dataset-tolerance.patch; \
+         if [[ "${ENABLE_OPTIMIZATION}" == 1 ]]; then \
+           sha256sum /opt/lingbot-vla-patches/0100-pi05-avoid-nested-checkpointing.patch; \
+         fi; \
+       } > /opt/lingbot-vla-patches/applied.sha256
+
+RUN python -m pip install --no-build-isolation --no-deps -e /workspace/transformers-openpi \
+    && python -m pip install --no-build-isolation --no-deps -e /workspace/lerobot \
+    && python -m pip install --no-build-isolation --no-deps -e /workspace/lingbot-vla
+
+RUN python - <<'PY'
+import json
+from importlib import metadata
+from pathlib import Path
+
+before = json.loads(Path("/opt/accelerator-packages.before.json").read_text())
+after = {}
+for name in before:
+    try:
+        after[name] = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        after[name] = None
+if before != after:
+    raise SystemExit(f"DTK package drift: before={before}, after={after}")
+for forbidden in ("torchcodec", "xformers"):
+    try:
+        version = metadata.version(forbidden)
+    except metadata.PackageNotFoundError:
+        continue
+    raise SystemExit(f"forbidden package installed: {forbidden}=={version}")
+Path("/opt/accelerator-packages.after.json").write_text(
+    json.dumps(after, indent=2, sort_keys=True) + "\n"
+)
+PY
+
+COPY datadown.sh /workspace/lingbot-vla/datadown.sh
+COPY start_pi.sh /workspace/lingbot-vla/start_pi.sh
+
+RUN chmod +x /workspace/lingbot-vla/datadown.sh /workspace/lingbot-vla/start_pi.sh \
+    && python -m pip check \
+    && python -m pip freeze > /opt/lingbot-vla-pip-freeze.txt
+
+WORKDIR /workspace/lingbot-vla
+CMD ["/bin/bash"]

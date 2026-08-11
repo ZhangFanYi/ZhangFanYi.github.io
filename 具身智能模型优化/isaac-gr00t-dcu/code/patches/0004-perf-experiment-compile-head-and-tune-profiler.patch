@@ -1,0 +1,35 @@
+From 000000000000000000000000cc71ccbf38105f3d Mon Sep 17 00:00:00 2001
+From: zhangyf9 <zhangyf9@hygon.cn>
+Date: Mon, 3 Aug 2026 10:00:00 +0800
+Subject: [PATCH 4/5] perf(experiment): compile action head and tune profiler schedule
+
+torch.compile the action head (disabled for rocBLAS profiling) and
+shift the profiler schedule skip_first from 10 to 90.
+---
+ gr00t__experiment__experiment_py
+1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/gr00t/experiment/experiment.py b/gr00t/experiment/experiment.py
+index a75ecb9..4c29bdc 100755
+--- a/gr00t/experiment/experiment.py
++++ b/gr00t/experiment/experiment.py
+@@ -301,7 +301,7 @@ def run(config: Config):
+         remove_unused_columns=config.training.remove_unused_columns,
+         ignore_data_skip=True,
+     )
+-
++    model.action_head = torch.compile(model.action_head)  # disabled for rocBLAS profiling
+     # Create trainer
+     trainer = Gr00tTrainer(
+         model=model,
+@@ -355,7 +355,7 @@ def run(config: Config):
+                 torch.profiler.ProfilerActivity.CPU,
+                 torch.profiler.ProfilerActivity.CUDA,
+             ],
+-            schedule=torch.profiler.schedule(skip_first=10, wait=1, warmup=1, active=3, repeat=1),
++            schedule=torch.profiler.schedule(skip_first=90, wait=1, warmup=1, active=3, repeat=1),
+             # profile_memory=True,
+             with_stack=True,
+             # record_shapes=True,
+-- 
+2.31.1

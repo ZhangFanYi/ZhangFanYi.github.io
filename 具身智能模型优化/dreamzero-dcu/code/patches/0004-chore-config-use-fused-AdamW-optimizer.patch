@@ -1,0 +1,27 @@
+From 2534f55833d98c4f71f4e301cdc96afa057fa701 Mon Sep 17 00:00:00 2001
+From: EmderYi <1042164240@qq.com>
+Date: Mon, 3 Aug 2026 11:21:24 +0800
+Subject: [PATCH 4/5] chore(config): use fused AdamW optimizer
+
+Switch the default optimizer from adamw_torch to adamw_torch_fused to
+reduce kernel launch overhead during the optimizer step.
+---
+ groot/vla/configs/conf.yaml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/groot/vla/configs/conf.yaml b/groot/vla/configs/conf.yaml
+index 48da05b..aa00be8 100644
+--- a/groot/vla/configs/conf.yaml
++++ b/groot/vla/configs/conf.yaml
+@@ -54,7 +54,7 @@ gradient_accumulation_steps: 1
+ dataloader_num_workers: 10
+ dataloader_pin_memory: true
+ dataloader_persistent_workers: true
+-optim: adamw_torch
++optim: adamw_torch_fused
+ learning_rate: 1e-4
+ adam_beta1: 0.95
+ adam_beta2: 0.999
+-- 
+2.39.5 (Apple Git-154)
+

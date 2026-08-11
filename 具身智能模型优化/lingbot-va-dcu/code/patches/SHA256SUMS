@@ -1,0 +1,6 @@
+234a2a5d784b0a88ec2a58fa6f16934d3cef1b5e960c0c6f1748da6693cf75ba  ./0000-cover-letter.patch
+d517b58ce8a6aa3350d7059ae64324db0ed5068a053cac02cd34e3e15fade10a  ./0001-perf-fsdp-wrap-model-at-transformer-block-granularit.patch
+166cf471a60e11e43c7bd81f585b50893c151442d66bbcf9ade583a97f39afcf  ./0002-perf-model-use-lightop-RMSNorm-and-selective-torch.c.patch
+519e9a473bf2994e7d35116471a32d41543e67b9dd46da0f729032294be83238  ./0003-perf-train-add-profiling-and-runtime-controls.patch
+51a15204ba70c9f9787058fbd2fde39f67526ba7e35c9bf31df3317faa2439d6  ./0004-perf-script-add-4-GPU-DTK-runtime-configuration.patch
+049148de19b824aac8ed0532c2c00198796153599cf4fd1899b7d6ce529daf46  ./0005-chore-config-update-RobotWin-training-configuration.patch

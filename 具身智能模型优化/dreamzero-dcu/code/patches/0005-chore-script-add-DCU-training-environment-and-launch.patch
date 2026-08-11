@@ -1,0 +1,121 @@
+From cd67df01abcdb331e51582c5cba9642374200315 Mon Sep 17 00:00:00 2001
+From: EmderYi <1042164240@qq.com>
+Date: Mon, 3 Aug 2026 11:21:24 +0800
+Subject: [PATCH 5/5] chore(script): add DCU training environment and launch
+ wrapper
+
+Add env_dz_bf16_100_xyz.sh and run_dz_bf16_100_xyz.sh that set the
+DREAMZERO_ROOT, data/model/tokenizer paths and 8-GPU DCU runtime
+options, then launch the post-train script with Hydra overrides.
+
+Also append $@ in droid_training_wan22.sh so the top-level wrapper's
+Hydra parameters override the defaults.
+---
+ env_dz_bf16_100_xyz.sh                | 17 +++++++++
+ run_dz_bf16_100_xyz.sh                | 50 +++++++++++++++++++++++++++
+ scripts/train/droid_training_wan22.sh |  4 ++-
+ 3 files changed, 70 insertions(+), 1 deletion(-)
+ create mode 100644 env_dz_bf16_100_xyz.sh
+ create mode 100755 run_dz_bf16_100_xyz.sh
+
+diff --git a/env_dz_bf16_100_xyz.sh b/env_dz_bf16_100_xyz.sh
+new file mode 100644
+index 0000000..0a4f5c8
+--- /dev/null
++++ b/env_dz_bf16_100_xyz.sh
+@@ -0,0 +1,17 @@
++#!/bin/bash
++# BW150 Baseline：新仓库运行，复用旧环境中的只读模型资产。
++export DREAMZERO_ROOT="/zhangyifan/dz/dreamzero-xyz"
++export DATA_ROOT="/zhangyifan/dz/all"
++export PYTHONPATH="${DREAMZERO_ROOT}:${PYTHONPATH:-}"
++export DROID_DATA_ROOT="${DATA_ROOT}"
++# 保留四卡 Baseline 默认值，同时允许单卡实验在启动命令中显式覆盖。
++export OUTPUT_DIR="${OUTPUT_DIR:-${DREAMZERO_ROOT}/checkpoints/dz_droid_wan22_bf16_100_xyz_baseline}"
++export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
++export NUM_GPUS="${NUM_GPUS:-8}"
++export WAN22_CKPT_DIR="/zhangyifan/dz/dreamzero/Wan2.2-TI2V-5B"
++export IMAGE_ENCODER_DIR="/zhangyifan/dz/all/dreamzero/model"
++export TEXT_ENCODER_PATH="${DATA_ROOT}/dreamzero/model/models_t5_umt5-xxl-enc-bf16.pth"
++export TOKENIZER_DIR="/zhangyifan/dz/dreamzero/checkpoints/umt5-xxl"
++export MIOPEN_FIND_MODE=3
++export MIOPEN_PRECISION_FP32_FP32_FP32_TF32_FP32=1
++export PYTORCH_MIOPEN_SUGGEST_NHWC=1
+diff --git a/run_dz_bf16_100_xyz.sh b/run_dz_bf16_100_xyz.sh
+new file mode 100755
+index 0000000..7554ec4
+--- /dev/null
++++ b/run_dz_bf16_100_xyz.sh
+@@ -0,0 +1,50 @@
++#!/bin/bash
++set -euo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++source "$SCRIPT_DIR/env_dz_bf16_100_xyz.sh"
++cd "$DREAMZERO_ROOT"
++
++DROID_DATA_ROOT="$DROID_DATA_ROOT" \
++WAN22_CKPT_DIR="$WAN22_CKPT_DIR" \
++IMAGE_ENCODER_DIR="$IMAGE_ENCODER_DIR" \
++TOKENIZER_DIR="$TOKENIZER_DIR" \
++DREAMZERO_ROOT="$DREAMZERO_ROOT" \
++bash scripts/train/droid_training_wan22.sh \
++    report_to=none \
++    train_architecture=lora \
++    num_frames=33 \
++    action_horizon=24 \
++    num_views=3 \
++    model=dreamzero/vla \
++    model/dreamzero/action_head=wan_flow_matching_action_tf_wan22 \
++    model/dreamzero/transform=dreamzero_cotrain \
++    num_frame_per_block=2 \
++    num_action_per_block=24 \
++    num_state_per_block=1 \
++    seed=42 \
++    training_args.learning_rate=1e-5 \
++    training_args.deepspeed="groot/vla/configs/deepspeed/zero2.json" \
++    save_steps=1000 \
++    training_args.warmup_ratio=0.05 \
++    output_dir=$OUTPUT_DIR \
++    per_device_train_batch_size=1 \
++    max_steps=100 \
++    weight_decay=1e-5 \
++    save_total_limit=10 \
++    upload_checkpoints=false \
++    bf16=true \
++    tf32=false \
++    eval_bf16=true \
++    dataloader_pin_memory=false \
++    dataloader_num_workers=1 \
++    save_lora_only=true \
++    max_chunk_size=4 \
++    save_strategy=no \
++    droid_data_root=$DROID_DATA_ROOT \
++    dit_version=$WAN22_CKPT_DIR \
++    text_encoder_pretrained_path=$TEXT_ENCODER_PATH \
++    image_encoder_pretrained_path=$IMAGE_ENCODER_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth \
++    vae_pretrained_path=$WAN22_CKPT_DIR/Wan2.2_VAE.pth \
++    tokenizer_path=$TOKENIZER_DIR \
++    "$@"
+diff --git a/scripts/train/droid_training_wan22.sh b/scripts/train/droid_training_wan22.sh
+index da56a65..3743ba1 100755
+--- a/scripts/train/droid_training_wan22.sh
++++ b/scripts/train/droid_training_wan22.sh
+@@ -100,6 +100,7 @@ else
+ fi
+ cd "$DREAMZERO_ROOT"
+ 
++# 上层运行脚本的 Hydra 参数放在最后，使其可以覆盖这里的默认值。
+ "${RUN_CMD[@]}" \
+     report_to=wandb \
+     data=dreamzero/droid_relative_wan22 \
+@@ -138,4 +139,5 @@ cd "$DREAMZERO_ROOT"
+     text_encoder_pretrained_path=$WAN22_CKPT_DIR/models_t5_umt5-xxl-enc-bf16.pth \
+     image_encoder_pretrained_path=$IMAGE_ENCODER_DIR/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth \
+     vae_pretrained_path=$WAN22_CKPT_DIR/Wan2.2_VAE.pth \
+-    tokenizer_path=$TOKENIZER_DIR
++    tokenizer_path=$TOKENIZER_DIR \
++    "$@"
+-- 
+2.39.5 (Apple Git-154)
+

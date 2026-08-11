@@ -1,0 +1,53 @@
+diff --git a/src/lerobot/optim/optimizers.py b/src/lerobot/optim/optimizers.py
+index 0a462e1a..d05a4ac8 100644
+--- a/src/lerobot/optim/optimizers.py
++++ b/src/lerobot/optim/optimizers.py
+@@ -314,6 +314,10 @@ def _save_single_optimizer_state(
+     state = dict(optim_state_dict) if optim_state_dict is not None else optimizer.state_dict()
+     param_groups = state.pop("param_groups")
+     flat_state = flatten_dict(state)
++    flat_state = {
++        key: value.contiguous() if isinstance(value, torch.Tensor) and not value.is_contiguous() else value
++        for key, value in flat_state.items()
++    }
+     save_file(flat_state, save_dir / OPTIMIZER_STATE)
+     write_json(param_groups, save_dir / OPTIMIZER_PARAM_GROUPS)
+ 
+diff --git a/src/lerobot/policies/act/modeling_act.py b/src/lerobot/policies/act/modeling_act.py
+index 1432b68a..7b75fbe3 100644
+--- a/src/lerobot/policies/act/modeling_act.py
++++ b/src/lerobot/policies/act/modeling_act.py
+@@ -472,6 +472,7 @@ class ACT(nn.Module):
+             # NOTE: If modifying this section, verify on MPS devices that
+             # gradients remain stable (no explosions or NaNs).
+             for img in batch[OBS_IMAGES]:
++                img = img.to(memory_format=torch.channels_last)
+                 cam_features = self.backbone(img)["feature_map"]
+                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+                 cam_features = self.encoder_img_feat_input_proj(cam_features)
+diff --git a/src/lerobot/scripts/lerobot_train.py b/src/lerobot/scripts/lerobot_train.py
+index 6e845852..599e01a4 100644
+--- a/src/lerobot/scripts/lerobot_train.py
++++ b/src/lerobot/scripts/lerobot_train.py
+@@ -207,7 +207,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
+     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
+     # We set find_unused_parameters=True to handle models with conditional computation
+     if accelerator is None:
+-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
++        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
+         # Force the device to be CPU when the active config's device is set to CPU (works for both policy and reward model training).
+         force_cpu = cfg.trainable_config.device == "cpu"
+@@ -296,6 +296,12 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
+             rename_map=cfg.rename_map,
+         )
+ 
++    if cfg.policy.type == "act" and hasattr(policy, "model"):
++        policy.model.backbone = policy.model.backbone.to(memory_format=torch.channels_last)
++        policy.model.encoder_img_feat_input_proj = policy.model.encoder_img_feat_input_proj.to(
++            memory_format=torch.channels_last
++        )
++
+     if cfg.peft is not None:
+         if cfg.is_reward_model_training:
+             raise ValueError("PEFT is only supported for policy training. ")

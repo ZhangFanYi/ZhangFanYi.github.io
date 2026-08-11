@@ -1,4 +1,0 @@
-transA,transB,M,N,K,alpha,lda,beta,ldb,ldc,ldd,batch_count,rocblas-Gflops,us
-T,N,4096,28128,12288,1,12288,0,12288,4096,4096,1, 363520, 7789
-transA,transB,M,N,K,alpha,lda,beta,ldb,ldc,ldd,batch_count,rocblas-Gflops,us
-T,N,4096,56256,12288,1,12288,0,12288,4096,4096,1, 63928.5, 88582

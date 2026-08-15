@@ -26,7 +26,6 @@
 | +Fused 优化器 | optimizer fused | 1.951 | 4.39 | 71.9% |
 | +全局 compile | torch.compile(flex_attention, max-autotune) | 1.281 | 6.23 | 110.3% |
 | +triton 更换 | 更换 triton 包后单次迭代耗时缩短一半 | 1.198 | 6.67 | 117.2% |
-| +freeze_vision_encoder=false | 视觉编码器参与训练(基准列) | 0.958 | 8.35 | 147% |
 | **+FSDP 通信优化 + flex attention + vision channels_last** | 全部优化叠加 | **0.7192** | **11.14** | **125%**(相对 H20 全局 compile) |
 
 H20 参考(同配置):开箱 1.404s/it、全局 compile 0.899s/it、freeze_vision_encoder 下 0.73s/it。

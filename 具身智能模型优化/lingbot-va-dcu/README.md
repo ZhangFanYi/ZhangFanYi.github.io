@@ -8,7 +8,7 @@ Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世
 
 - 模型:[LingBot-VA](https://technology.robbyant.com/lingbot-va)(arXiv:2601.21998), 模型和数据集下载和官网保持一致
 
-  ​```bash
+  ​```
   huggingface-cli download --repo-type dataset robbyant/robotwin-clean-and-aug-lerobot
   modelscope download --model Robbyant/lingbot-va-base
   ​```

@@ -17,5 +17,6 @@ Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世
 ## 优化记录
 1. 修改FSDP粒度 实现overlap
 2. 提取三个热点算子为单独函数并分别做融合
+   
 详情请见code/patches
 优化后性能达到H20的96% Loss水平正常

@@ -1,4 +1,4 @@
-<img width="879" height="117" alt="截屏2026-08-15 15 37 04" src="https://github.com/user-attachments/assets/dd06f14c-5f7e-48b0-bc5a-365597a862fe" /># DreamZero-DCU 适配优化
+# DreamZero-DCU 适配优化
 
 ## 概述
 
@@ -33,6 +33,6 @@ DreamZero (VLA)
 
 使用Wan2.2-TI2V-5B时 开箱性能为H20的82.6%
 使用如下手段进行优化：
-# 1. 优化器更换 AdamW 更换为 AdamW_fused 性能提升2.6%
-# 2. Channel Last 3d 性能提升4.1%
-# 3. 消除fa的重复缓存 性能提升 21%
+### 1. 优化器更换 AdamW 更换为 AdamW_fused 性能提升2.6%
+### 2. Channel Last 3d 性能提升4.1%
+### 3. 消除fa的重复缓存 性能提升 21%

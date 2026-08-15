@@ -33,6 +33,6 @@ DreamZero (VLA)
 
 使用Wan2.2-TI2V-5B时 开箱性能为H20的82.6%
 使用如下手段进行优化：
-### 1. 优化器更换 AdamW 更换为 AdamW_fused 性能提升2.6%
-### 2. Channel Last 3d 性能提升4.1%
-### 3. 消除fa的重复缓存 性能提升 21%
+1. 优化器更换 AdamW 更换为 AdamW_fused 性能提升2.6%
+2. Channel Last 3d 性能提升4.1%
+3. 消除fa的重复缓存 性能提升 21%

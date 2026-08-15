@@ -1,10 +1,10 @@
-# 项目 14: LingBot-VLA-DCU 部署与性能优化(具身智能 · VLA 动作模型,重点专项)
+# LingBot-VLA-DCU 适配优化
 
 ## 概述
 
-**LingBot-VLA 4B**(pi0.5 架构,Vision-Language-Action 模型)在海光 BW1000(DCU)上的完整部署、适配与性能优化专项。目标是追平甚至超越 H20 上的开箱性能。
+**LingBot-VLA 4B**(pi0.5 架构,Vision-Language-Action 模型)在海光 BW1000(DCU)上的完整部署、适配与性能优化专项
 
-**最终成果:BW1000 达 H20(开启全局 compile)的 125%(samples/s/gpu 11.14 vs 8.9),全流程收益 100% → 125% 以上。**
+
 
 ## 一、环境与部署
 
@@ -85,3 +85,5 @@ lingbot-vla-dcu/
 - FSDP reuse-aware reshard 对"双塔/交叉注意力"结构(同一参数反向多次 use)收益巨大
 - 首次 torch.compile autotune 约 2 分钟(24 个 kernel shape),后续缓存复用无开销;checkpoint 保存每 ~20 步有一次 ~3s spike,属正常现象
 - 量化/框架版本差异(如 video backend、triton 版本)对性能影响可达到 10%~50%,基准测试前务必锁定环境
+
+  **最终成果:BW1000 达 H20(开启全局 compile)的 125%(samples/s/gpu 11.14 vs 8.9),全流程收益 100% → 125% 以上。**

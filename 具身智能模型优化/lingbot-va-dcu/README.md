@@ -1,28 +1,21 @@
-# 项目 13: LingBot-VA-DCU 适配优化(具身智能 · 因果世界模型)
+# LingBot-VA-DCU 适配优化
 
 ## 概述
 
-Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世界模型)在海光 DCU 上的部署适配与优化,移植自 GitLab 仓 `ts-models-opt/training/embodied-ai/lingbot-va-dcu`。
+Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世界模型)在海光 DCU 上的部署适配与优化
 
 ## 技术要点
 
-- 模型:[LingBot-VA](https://technology.robbyant.com/lingbot-va)(arXiv:2601.21998),视频动作(VA)世界模型
-- DCU 适配:`patches/` 内含 DCU 适配 patch;依赖(flash-attn 等)按海光生态替换
-- 提供 `Makefile` / `script` / `evaluation` / `example` 等完整工程结构
+- 模型:[LingBot-VA](https://technology.robbyant.com/lingbot-va)(arXiv:2601.21998), 模型和数据集下载和官网保持一致
+  ​```
+  huggingface-cli download --repo-type dataset robbyant/robotwin-clean-and-aug-lerobot
+  modelscope download --model Robbyant/lingbot-va-base
+  ​```
+- DCU 适配: 删除 NVIDIA 相关依赖,替换为 DCU 生态包(pypi.sourcefind.cn 对应版本)
+- 完整镜像: wget https://hygon-torch-third-party-1251001002.cos.ap-shanghai.myqcloud.com/external/haiguang/image/va_image.tar.gz
 
-## 代码
-
-[code](./code/) 为完整适配仓:
-
-```
-code/
-├── wan_va/          # 模型实现
-├── patches/         # DCU 适配 patch
-├── evaluation/  example/  script/
-├── pyproject.toml   # 依赖定义(含 flash-attn 安装说明)
-└── officical-README.md / INSTALL.md
-```
-
-## 文档
-
-暂无独立报告文档。
+## 优化记录
+1. 修改FSDP粒度 实现overlap
+2. 提取三个热点算子为单独函数并分别做融合
+详情请见code/patches
+优化后性能达到H20的96% Loss水平正常

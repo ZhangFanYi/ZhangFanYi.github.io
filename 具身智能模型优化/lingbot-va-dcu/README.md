@@ -10,6 +10,8 @@ Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世
 
   ​```
   huggingface-cli download --repo-type dataset robbyant/robotwin-clean-and-aug-lerobot
+  ​```
+  ​```
   modelscope download --model Robbyant/lingbot-va-base
   ​```
 - DCU 适配: 删除 NVIDIA 相关依赖,替换为 DCU 生态包(pypi.sourcefind.cn 对应版本)

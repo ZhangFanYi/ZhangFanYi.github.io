@@ -7,7 +7,8 @@ Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世
 ## 技术要点
 
 - 模型:[LingBot-VA](https://technology.robbyant.com/lingbot-va)(arXiv:2601.21998), 模型和数据集下载和官网保持一致
-  ​```
+
+  ​```bash
   huggingface-cli download --repo-type dataset robbyant/robotwin-clean-and-aug-lerobot
   modelscope download --model Robbyant/lingbot-va-base
   ​```
@@ -19,4 +20,4 @@ Robbyant 团队 **LingBot-VA**(Causal World Modeling for Robot Control,因果世
 2. 提取三个热点算子为单独函数并分别做融合
    
 详情请见code/patches
-优化后性能达到H20的96% Loss水平正常
+优化后性能达到H20的96% Loss下降水平一致

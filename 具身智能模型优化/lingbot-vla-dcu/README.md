@@ -30,7 +30,7 @@
 
 H20 参考(同配置):开箱 1.404s/it、全局 compile 0.899s/it、freeze_vision_encoder 下 0.73s/it。
 
-## 三、关键优化(5 个 patch)
+## 三、关键优化
 
 ### 1. FSDP 通信优化(0.98s → 0.74s,最大单项收益)
 
@@ -54,10 +54,7 @@ H20 参考(同配置):开箱 1.404s/it、全局 compile 0.899s/it、freeze_visio
 
 - `Qwen2_5_VisionPatchEmbed.forward`:patch 的 view 结果用 `memory_format=torch.channels_last_3d` 摆放后再进 Conv3d,显著降低 DCU 上卷积访存
 
-### 5. 环境变量与 torchcodec
 
-- 新增 `TRITON_FLEX_TUNED=1` / `TRITON_FLEX_ASYMMETRIC_BWD=1`(flex asymmetric bwd)、`TORCHINDUCTOR_FORCE_POINTER_RANGE=1`、`HSA_FORCE_FINE_GRAIN_PCIE=1`
-- 若 DCU 能支持 torchcodec 视频后端,预计可再提升 ~10%
 
 
 

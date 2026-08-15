@@ -59,13 +59,9 @@ H20 参考(同配置):开箱 1.404s/it、全局 compile 0.899s/it、freeze_visio
 - 新增 `TRITON_FLEX_TUNED=1` / `TRITON_FLEX_ASYMMETRIC_BWD=1`(flex asymmetric bwd)、`TORCHINDUCTOR_FORCE_POINTER_RANGE=1`、`HSA_FORCE_FINE_GRAIN_PCIE=1`
 - 若 DCU 能支持 torchcodec 视频后端,预计可再提升 ~10%
 
-## 四、Trace 对比结论
 
-- 前向传播完全无 overlap,与 H20 相比 `triton_tem_fused_slice_backward_transpose_view_zeros_2` 单个算子相差 199ms(与框架侧协同排查中)
-- 更换 triton 包后,单次迭代算子耗时缩短到 H20 的一半
-- 通信优化的本质:反向两次 use 的重复 all-gather/reduce-scatter 被消除
 
-## 代码与文档
+## 四、代码与文档
 
 ```
 lingbot-vla-dcu/
@@ -79,10 +75,6 @@ lingbot-vla-dcu/
     └── README.md           # 海光适配版部署说明
 ```
 
-## 经验沉淀
 
-- FSDP reuse-aware reshard 对"双塔/交叉注意力"结构(同一参数反向多次 use)收益巨大
-- 首次 torch.compile autotune 约 2 分钟(24 个 kernel shape),后续缓存复用无开销;checkpoint 保存每 ~20 步有一次 ~3s spike,属正常现象
-- 量化/框架版本差异(如 video backend、triton 版本)对性能影响可达到 10%~50%,基准测试前务必锁定环境
 
   **最终成果:BW1000 达 H20(开启全局 compile)的 125%(samples/s/gpu 11.14 vs 8.9),全流程收益 100% → 125% 以上。**

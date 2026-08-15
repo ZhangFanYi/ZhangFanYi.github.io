@@ -5,20 +5,26 @@
 面向具身智能的世界模型 **DreamZero**在海光 DCU 上的部署适配与优化
 
 **DreamZero**模型结构
+​```
 DreamZero (VLA)
 ├── 文本编码器 (T5)
 ├── 图像编码器 (CLIP)
 ├── 视频VAE
 └── Action Head (WANPolicyHead)
     └── 视频DiT骨干网络 ← Wan2.1 / Wan2.2 
-    
+​```
 ## 技术要点
 
 - 模型:[DreamZero](https://github.com/dreamzero0/dreamzero)+ google/umt5-xxl 文本编码器
+    ​```
     hf download Wan-AI/Wan2.1-I2V-14B-480P --local-dir ./checkpoints/Wan2.1-I2V-14B-480P
     hf download google/umt5-xxl --local-dir ./checkpoints/umt5-xxl
+    ​```
+  
 - 数据集:DreamZero-DROID-Data(具身操作轨迹数据)
+    ​```
     huggingface-cli download GEAR-Dreams/DreamZero-DROID-Data --repo-type dataset --local-dir ./data/droid_lerobot
+    ​```
 - DCU 适配:删除 NVIDIA 相关依赖,替换为 DCU 生态包(pypi.sourcefind.cn 对应版本)
 - 视频解码组件 torchcodec 按海光文档单独适配
 - 基础镜像:`harbor.sourcefind.cn:5443/dcu/admin/base/pytorch:2.9.0-ubuntu22.04-dtk26.04-py3.10`

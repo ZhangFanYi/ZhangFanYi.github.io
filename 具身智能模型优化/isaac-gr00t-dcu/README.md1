@@ -1,29 +1,56 @@
-# 项目 11: Isaac-GR00T-DCU 适配优化(具身智能 · 人形机器人基础模型)
+# Isaac-GR00T-DCU 适配优化
 
 ## 概述
 
-英伟达 **Isaac GR00T**(人形机器人基础模型,GR00T-N1)在海光 DCU 上的微调适配与优化,移植自 GitLab 仓 `ts-models-opt/training/embodied-ai/isaac-gr00t-dcu`。
+英伟达 **Isaac GR00T**(人形机器人基础模型,GR00T-N1)在海光 DCU 上的微调适配与优化
 
 ## 技术要点
 
 - 模型:GR00T-N1(如 GR00T-N1.7-3B-local-cosmos)
+
+  ```bash
+  export HF_ENDPOINT=https://hf-mirror.com
+  huggingface-cli download nvidia/Gr00T-N1.7-3B --local-dir /workspace/data/checkpoints/GR00T-N1.7-3B-local-cosmos
+  huggingface-cli download nvidia/Cosmos-Reason2-2B --local-dir /workspace/data/checkpoints/nvidia/Cosmos-Reason2-2B
+  ```
+
 - 数据集:LIBERO 系列(libero_10_no_noops_1.0.0_lerobot_h264),embodiment-tag `LIBERO_PANDA`
+
+  ```bash
+  huggingface-cli download lerobot/libero_10_no_noops --local-dir /workspace/data/libero_10_no_noops_1.0.0_lerobot_h264
+  ```
+
 - DCU 适配:依赖替换为 DCU 生态版本;模型与训练代码修改集中在 `patches/` 文件夹
 - 基础镜像:`harbor.sourcefind.cn:5443/dcu/admin/base/pytorch:2.9.0-ubuntu22.04-dtk26.04-py3.10`
-- 微调命令:`bash examples/finetune.sh --base-model-path <ckpt> --dataset-path <data> --embodiment-tag LIBERO_PANDA ...`
+- 启动命令:
 
-## 代码
+  ```bash
+  #!/bin/bash
+  set -x -euo pipefail
 
-[code](./code/) 为完整适配仓:
+  source /zhangyifan/groot/torchcodec-env/bin/activate
+  export PYTHONPATH=/zhangyifan/groot/Isaac-GR00T:${PYTHONPATH:-}
+  cd /zhangyifan/groot/Isaac-GR00T
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export USE_COMPILE="${USE_COMPILE:-1}"
+  export ROCBLAS_TENSILE_GEMM_OVERRIDE_PATH=/zhangyifan/groot/tuned_gemm.log
+  NUM_GPUS=8 MASTER_PORT="${MASTER_PORT:-29506}" MAX_STEPS=500 USE_WANDB=0 \
+  DATALOADER_NUM_WORKERS=16 GLOBAL_BATCH_SIZE=960 \
+  EXPERIMENT_NAME=0731 HF_TOKEN=${HF_TOKEN} \
+  bash examples/finetune.sh \
+    --base-model-path /zhangyifan/groot/checkpoints/GR00T-N1.7-3B-local-cosmos \
+    --dataset-path /zhangyifan/groot/libero_10_no_noops_1.0.0_lerobot_h264 \
+    --embodiment-tag LIBERO_PANDA \
+    --output-dir /zhangyifan/groot/outputs
+  ```
 
-```
-code/
-├── gr00t/           # GR00T 源码
-├── patches/         # DCU 适配与优化 patch
-├── uv.lock
-└── README.md        # 海光适配版部署说明(镜像/模型/数据集)
-```
+## 优化记录
 
-## 文档
+1. 优化器更换:AdamW 替换为 AdamW_fused
+2. Action_head 进行局部融合
 
-暂无独立报告文档,部署与适配细节见 [code/README.md](./code/README.md)。
+   ```python
+   model.action_head = torch.compile(model.action_head)
+   ```
+
+3. Gemm 调优:如遇 GBS 调整带来的性能劣化,可从 trace 文件中观察到矩阵乘耗时占比增加,可用 DTK 自带的 `/opt/dtk/lib/rocblas/rocblas-gemm-tune` 调优

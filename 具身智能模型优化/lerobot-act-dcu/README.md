@@ -1,29 +1,20 @@
-# 项目 12: LeRobot-ACT-DCU 适配优化(具身智能 · 动作策略 ACT)
+# LeRobot-ACT-DCU 适配优化
 
 ## 概述
 
-LeRobot **ACT**(Action Chunking with Transformers)动作策略在海光 DCU 上的训练适配与优化,移植自 GitLab 仓 `ts-models-opt/training/embodied-ai/lerobot-act-dcu`。
+LeRobot **ACT**动作策略在海光 DCU 上的训练适配与优化
 
 ## 技术要点
 
-- 框架:LeRobot 上游源码(基线提交 `e40b58a8`),ACT 动作策略训练
+- 模型 数据集下载请参考code/datadown.sh
+- 环境构建请参考code/dockerfile
 - DCU 适配:`patches/` 内含 ACT on Hygon DCU 的优化 patch,镜像构建时通过 `ENABLE_OPTIMIZATION=1` 开关启用
-- 目录结构参照 lingbot-vla-dcu 的交付方式
 
-## 代码
 
-[code](./code/) 为完整适配仓:
+## 优化记录
+1. Channel Last
+2. 开启TF32加速
 
-```
-code/
-├── lerobot/         # 上游 LeRobot 源码(基线 e40b58a8)
-├── patches/         # ACT on Hygon DCU 优化 patch
-├── dockerfile       # 镜像构建(可开关优化)
-├── datadown.sh      # 数据下载
-├── start_act.sh     # 训练启动
-└── README.md        # 海光适配版部署说明
-```
-
-## 文档
-
-暂无独立报告文档,部署与适配细节见 [code/README.md](./code/README.md)。
+<img width="1042" height="146" alt="截屏2026-08-15 16 27 21" src="https://github.com/user-attachments/assets/415e42fd-fbad-4b21-a951-44d707e218f0" />
+<img width="1280" height="468" alt="image" src="https://github.com/user-attachments/assets/e9b4d161-c40e-4d0d-9537-cc8574ebee8c" />
+从单卡到8卡的拓展比>95%

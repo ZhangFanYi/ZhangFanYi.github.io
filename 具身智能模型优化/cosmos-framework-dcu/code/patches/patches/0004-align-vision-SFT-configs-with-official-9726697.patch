@@ -1,0 +1,335 @@
+From 3343dd1af53f1780410d2a1870b1aac7757c2cee Mon Sep 17 00:00:00 2001
+From: iMountTai <2506700016@qq.com>
+Date: Fri, 31 Jul 2026 14:08:25 +0800
+Subject: [PATCH 4/6] align vision SFT configs with official 9726697
+
+---
+ .../configs/base/defaults/model_config.py         |  6 ++++++
+ .../experiment/sft/models/nano_model_config.py    |  2 +-
+ .../experiment/sft/models/super_model_config.py   |  2 +-
+ .../base/experiment/sft/vision_sft_nano.py        | 10 +++++++---
+ .../model/generator/mot/cosmos3_vfm_network.py    | 15 ++++++++++-----
+ .../model/generator/mot/modeling_utils.py         | 13 ++++++++-----
+ .../model/generator/omni_mot_model.py             |  1 +
+ ..._generator_vision_nano_cosmosdataloader_hcu.sh |  7 -------
+ ...r_vision_nano_cosmosdataloader_nvidia_local.sh |  4 ----
+ examples/launch_sft_generator_vision_nano_hcu.sh  |  2 --
+ ...unch_sft_generator_vision_nano_nvidia_local.sh |  2 --
+ examples/toml/sft_config/vision_sft_nano.toml     |  2 +-
+ .../vision_sft_nano_mapstyle_dataloader.toml      |  2 +-
+ 13 files changed, 36 insertions(+), 32 deletions(-)
+
+diff --git a/cosmos_framework/configs/base/defaults/model_config.py b/cosmos_framework/configs/base/defaults/model_config.py
+index adde6bd..b1618ad 100644
+--- a/cosmos_framework/configs/base/defaults/model_config.py
++++ b/cosmos_framework/configs/base/defaults/model_config.py
+@@ -255,6 +255,12 @@ class OmniMoTModelConfig:
+     sound_dim: int | None = None  # Sound latent channel size (e.g., 64 for AVAE 48kHz)
+     sound_latent_fps: int = 25  # Sound tokenizer's latent rate (e.g., 48kHz / 1920 hop = 25 Hz)
+ 
++    # When False, removes bias from vae2llm, sound2llm, and the two Linear layers inside
++    # time_embedder.  These biases seem to inject token-constant DC offsets that dominate
++    # the MoE router input and create prompt invariant routing.  This is observed empirically
++    # in the 30B-A3B checkpoint.
++    enable_input_bias: bool = True
++
+     log_enc_time_every_n: int = 100  # Frequency of logging encoding time to W&B
+ 
+     # When True, ``OmniMoTModel.state_dict`` / ``load_state_dict`` skip the
+diff --git a/cosmos_framework/configs/base/experiment/sft/models/nano_model_config.py b/cosmos_framework/configs/base/experiment/sft/models/nano_model_config.py
+index dd473be..226d038 100644
+--- a/cosmos_framework/configs/base/experiment/sft/models/nano_model_config.py
++++ b/cosmos_framework/configs/base/experiment/sft/models/nano_model_config.py
+@@ -97,7 +97,7 @@ NANO_MODEL_CONFIG = dict(
+     tokenizer=dict(
+         bucket_name="",
+         chunk_duration=93,
+-        encode_chunk_frames={"256": 68, "480": 24, "720": 12},
++        encode_chunk_frames={"256": 68, "480": 24, "720": 8, "768": 8},
+         encode_exact_durations=None,
+         keep_decoder_cache=False,
+         object_store_credential_path_pretrained="",
+diff --git a/cosmos_framework/configs/base/experiment/sft/models/super_model_config.py b/cosmos_framework/configs/base/experiment/sft/models/super_model_config.py
+index a4f6529..21c61b4 100644
+--- a/cosmos_framework/configs/base/experiment/sft/models/super_model_config.py
++++ b/cosmos_framework/configs/base/experiment/sft/models/super_model_config.py
+@@ -119,7 +119,7 @@ SUPER_MODEL_CONFIG = dict(
+     tokenizer=dict(
+         bucket_name="",
+         chunk_duration=93,
+-        encode_chunk_frames={"256": 68, "480": 24, "720": 12},
++        encode_chunk_frames={"256": 68, "480": 24, "720": 8, "768": 8},
+         encode_exact_durations=None,
+         keep_decoder_cache=False,
+         object_store_credential_path_pretrained="",
+diff --git a/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py b/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py
+index 6597ffb..6e04bb2 100644
+--- a/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py
++++ b/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py
+@@ -30,7 +30,7 @@ Usage::
+         checkpoint.load_path=<path>
+ """
+ 
+-import copy
++from copy import deepcopy
+ 
+ from hydra.core.config_store import ConfigStore
+ 
+@@ -52,6 +52,9 @@ from cosmos_framework.utils.lazy_config import LazyDict
+ 
+ cs = ConfigStore.instance()
+ 
++VISION_NANO_MODEL_CONFIG = deepcopy(NANO_MODEL_CONFIG)
++VISION_NANO_MODEL_CONFIG["action_gen"] = False
++
+ 
+ vision_sft_nano = LazyDict(
+     dict(
+@@ -89,7 +92,7 @@ vision_sft_nano = LazyDict(
+             wandb_mode="disabled",
+         ),
+         model=dict(
+-            config=copy.deepcopy(NANO_MODEL_CONFIG),
++            config=deepcopy(VISION_NANO_MODEL_CONFIG),
+         ),
+         optimizer=dict(
+             betas=[0.9, 0.95],
+@@ -292,7 +295,7 @@ vision_sft_nano = LazyDict(
+ # ``PackingDataLoader`` + ``RankPartitionedDataLoader``. Every other block is reused
+ # verbatim by deep-copying the base recipe and overriding only ``job.name`` and
+ # ``dataloader_train``.
+-vision_sft_nano_mapstyle_dataloader = copy.deepcopy(vision_sft_nano)
++vision_sft_nano_mapstyle_dataloader = deepcopy(vision_sft_nano)
+ vision_sft_nano_mapstyle_dataloader.job.name = "vision_sft_nano_mapstyle_dataloader"
+ vision_sft_nano_mapstyle_dataloader.dataloader_train = L(CosmosDataLoader)(
+     distributor=L(RankPartitionedDistributor)(
+@@ -302,6 +305,7 @@ vision_sft_nano_mapstyle_dataloader.dataloader_train = L(CosmosDataLoader)(
+                 dataset=L(get_sft_dataset)(
+                     append_duration_fps_timestamps=True,
+                     append_resolution_info=True,
++                    max_caption_tokens=2048,
+                     caption_suffix="",
+                     cfg_dropout_keep_metadata=False,
+                     cfg_dropout_rate=0.1,
+diff --git a/cosmos_framework/model/generator/mot/cosmos3_vfm_network.py b/cosmos_framework/model/generator/mot/cosmos3_vfm_network.py
+index 3924576..cdb2cbc 100644
+--- a/cosmos_framework/model/generator/mot/cosmos3_vfm_network.py
++++ b/cosmos_framework/model/generator/mot/cosmos3_vfm_network.py
+@@ -53,6 +53,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
+         sound_dim: int | None = None,
+         temporal_compression_factor_sound=1,
+         sound_latent_fps: int = 25,
++        enable_input_bias: bool = True,
+         **kwargs,
+     ):
+         self.vision_gen = vision_gen
+@@ -76,6 +77,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
+         self.temporal_compression_factor_vision = temporal_compression_factor_vision
+         self.natten_parameter_list = natten_parameter_list
+         self.video_temporal_causal = video_temporal_causal
++        self.enable_input_bias = enable_input_bias
+ 
+         # action related parameters
+         self.action_gen = action_gen  # whether to generate action tokens
+@@ -144,8 +146,9 @@ class Cosmos3VFMNetwork(PreTrainedModel):
+             self.latent_channel = config.latent_channel_size
+             self.patch_latent_dim = self.latent_patch_size**2 * self.latent_channel
+ 
+-            self.time_embedder = TimestepEmbedder(self.hidden_size)
+-            self.vae2llm = nn.Linear(self.patch_latent_dim, self.hidden_size)
++            _input_bias = config.enable_input_bias
++            self.time_embedder = TimestepEmbedder(self.hidden_size, bias=_input_bias)
++            self.vae2llm = nn.Linear(self.patch_latent_dim, self.hidden_size, bias=_input_bias)
+             self.llm2vae = nn.Linear(self.hidden_size, self.patch_latent_dim)
+ 
+         if config.action_gen:
+@@ -158,7 +161,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
+ 
+         if config.sound_gen:
+             self.sound_dim = config.sound_dim
+-            self.sound2llm = nn.Linear(config.sound_dim, self.hidden_size)
++            self.sound2llm = nn.Linear(config.sound_dim, self.hidden_size, bias=config.enable_input_bias)
+             self.llm2sound = nn.Linear(self.hidden_size, config.sound_dim)
+             self.sound_modality_embed = nn.Parameter(torch.zeros(self.hidden_size))
+ 
+@@ -172,7 +175,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
+         if self.config.vision_gen:
+             std = 1.0 / math.sqrt(self.patch_latent_dim)
+             torch.nn.init.trunc_normal_(self.vae2llm.weight, std=std, a=-3 * std, b=3 * std)
+-            torch.nn.init.zeros_(self.vae2llm.bias)
++            if self.config.enable_input_bias:
++                torch.nn.init.zeros_(self.vae2llm.bias)
+ 
+             std = 1.0 / math.sqrt(self.hidden_size)
+             torch.nn.init.trunc_normal_(self.llm2vae.weight, std=std, a=-3 * std, b=3 * std)
+@@ -197,7 +201,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
+             # sound2llm: input_size=sound_dim, output_size=hidden_size
+             std = 1.0 / math.sqrt(self.sound_dim)
+             torch.nn.init.trunc_normal_(self.sound2llm.weight, std=std, a=-3 * std, b=3 * std)
+-            torch.nn.init.zeros_(self.sound2llm.bias)
++            if self.config.enable_input_bias:
++                torch.nn.init.zeros_(self.sound2llm.bias)
+ 
+             # llm2sound: input_size=hidden_size, output_size=sound_dim
+             std = 1.0 / math.sqrt(self.hidden_size)
+diff --git a/cosmos_framework/model/generator/mot/modeling_utils.py b/cosmos_framework/model/generator/mot/modeling_utils.py
+index 037cd86..68e51c7 100644
+--- a/cosmos_framework/model/generator/mot/modeling_utils.py
++++ b/cosmos_framework/model/generator/mot/modeling_utils.py
+@@ -30,24 +30,27 @@ class TimestepEmbedder(nn.Module):
+     Embeds scalar timesteps into vector representations.
+     """
+ 
+-    def __init__(self, hidden_size, frequency_embedding_size=256):
++    def __init__(self, hidden_size, frequency_embedding_size=256, bias: bool = True):
+         super().__init__()
+         self.mlp = nn.Sequential(
+-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
++            nn.Linear(frequency_embedding_size, hidden_size, bias=bias),
+             nn.SiLU(),
+-            nn.Linear(hidden_size, hidden_size, bias=True),
++            nn.Linear(hidden_size, hidden_size, bias=bias),
+         )
+         self.frequency_embedding_size = frequency_embedding_size
+         self.hidden_size = hidden_size
++        self._has_bias = bias
+ 
+     def _init_weights(self):
+         std = 1.0 / math.sqrt(self.frequency_embedding_size)
+         torch.nn.init.trunc_normal_(self.mlp[0].weight, std=std, a=-3 * std, b=3 * std)
+-        torch.nn.init.zeros_(self.mlp[0].bias)
++        if self._has_bias:
++            torch.nn.init.zeros_(self.mlp[0].bias)
+ 
+         std = 1.0 / math.sqrt(self.hidden_size)
+         torch.nn.init.trunc_normal_(self.mlp[2].weight, std=std, a=-3 * std, b=3 * std)
+-        torch.nn.init.zeros_(self.mlp[2].bias)
++        if self._has_bias:
++            torch.nn.init.zeros_(self.mlp[2].bias)
+ 
+     @staticmethod
+     def timestep_embedding(t, dim, max_period=10000):
+diff --git a/cosmos_framework/model/generator/omni_mot_model.py b/cosmos_framework/model/generator/omni_mot_model.py
+index 656364b..3d5d97d 100644
+--- a/cosmos_framework/model/generator/omni_mot_model.py
++++ b/cosmos_framework/model/generator/omni_mot_model.py
+@@ -198,6 +198,7 @@ class OmniMoTModel(ImaginaireModel):
+                 vision_gen=self.config.vision_gen,
+                 action_gen=self.config.action_gen,
+                 sound_gen=self.config.sound_gen,
++                enable_input_bias=self.config.enable_input_bias,
+                 joint_attn_implementation=self.config.joint_attn_implementation,
+                 timestep_scale=1.0 / float(num_train_timesteps) * self.config.diffusion_expert_config.timestep_range,
+                 action_dim=self.config.max_action_dim,
+diff --git a/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh b/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+index 4879320..30e3a24 100644
+--- a/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
++++ b/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+@@ -17,7 +17,6 @@ set -euo pipefail
+ : "${MASTER_PORT:=29713}"
+ : "${MAX_ITER:=70}"
+ : "${CHECKPOINT_SAVE_ITER:=1000}"
+-: "${MAX_CAPTION_TOKENS:=2048}"
+ : "${PERF_RECORD_ENABLED:=true}"
+ : "${PERF_WARMUP_ITERS:=10}"
+ 
+@@ -43,13 +42,8 @@ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] ||
+ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
+ 
+ TAIL_OVERRIDES=(
+-    "job.wandb_mode=disabled"
+     "job.name=${RUN_NAME}"
+     "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
+-    # Match the base Vision Nano recipe. The map-style experiment otherwise
+-    # falls back to get_sft_dataset's 1024-token default and truncates captions.
+-    "dataloader_train.distributor.datasets.video.dataset.max_caption_tokens=${MAX_CAPTION_TOKENS}"
+-    "trainer.seed=42"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+ )
+@@ -58,6 +52,5 @@ TAIL_OVERRIDES+=("$@")
+ echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
+ echo ">>> Processes per node: ${NPROC_PER_NODE}"
+ echo ">>> Max iterations: ${MAX_ITER}"
+-echo ">>> Max caption tokens: ${MAX_CAPTION_TOKENS}"
+ 
+ source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh b/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+index 7a6cdf7..cad0f03 100644
+--- a/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
++++ b/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+@@ -13,18 +13,14 @@ set -euo pipefail
+ : "${MASTER_PORT:=30713}"
+ : "${MAX_ITER:=70}"
+ : "${CHECKPOINT_SAVE_ITER:=1000}"
+-: "${MAX_CAPTION_TOKENS:=2048}"
+ 
+ source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
+ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
+ [[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
+ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
+ TAIL_OVERRIDES=(
+-    "job.wandb_mode=disabled"
+     "job.name=${RUN_NAME}"
+     "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
+-    "dataloader_train.distributor.datasets.video.dataset.max_caption_tokens=${MAX_CAPTION_TOKENS}"
+-    "trainer.seed=42"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+ )
+diff --git a/examples/launch_sft_generator_vision_nano_hcu.sh b/examples/launch_sft_generator_vision_nano_hcu.sh
+index 17cc5c0..2189c95 100755
+--- a/examples/launch_sft_generator_vision_nano_hcu.sh
++++ b/examples/launch_sft_generator_vision_nano_hcu.sh
+@@ -44,10 +44,8 @@ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] ||
+ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
+ 
+ TAIL_OVERRIDES=(
+-    "job.wandb_mode=disabled"
+     "job.name=${RUN_NAME}"
+     "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
+-    "trainer.seed=42"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+ )
+diff --git a/examples/launch_sft_generator_vision_nano_nvidia_local.sh b/examples/launch_sft_generator_vision_nano_nvidia_local.sh
+index 70b623e..aab8cc8 100644
+--- a/examples/launch_sft_generator_vision_nano_nvidia_local.sh
++++ b/examples/launch_sft_generator_vision_nano_nvidia_local.sh
+@@ -19,10 +19,8 @@ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] ||
+ [[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
+ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
+ TAIL_OVERRIDES=(
+-    "job.wandb_mode=disabled"
+     "job.name=${RUN_NAME}"
+     "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
+-    "trainer.seed=42"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+ )
+diff --git a/examples/toml/sft_config/vision_sft_nano.toml b/examples/toml/sft_config/vision_sft_nano.toml
+index dbb192d..aac4567 100644
+--- a/examples/toml/sft_config/vision_sft_nano.toml
++++ b/examples/toml/sft_config/vision_sft_nano.toml
+@@ -50,7 +50,7 @@ keys_to_select = [
+     "vae2llm",
+     "llm2vae",
+ ]
+-lr            = 2.0e-5
++lr            = 1.0e-4
+ weight_decay  = 0                                        # int matches legacy YAML repr
+ # lr_multipliers intentionally empty for vision SFT (Hydra default {} stands).
+ 
+diff --git a/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml b/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml
+index 5d76be8..1e7aea5 100644
+--- a/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml
++++ b/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml
+@@ -58,7 +58,7 @@ keys_to_select = [
+     "vae2llm",
+     "llm2vae",
+ ]
+-lr            = 2.0e-5
++lr            = 1.0e-4
+ weight_decay  = 0                                        # int matches legacy YAML repr
+ # lr_multipliers intentionally empty for vision SFT (Hydra default {} stands).
+ 

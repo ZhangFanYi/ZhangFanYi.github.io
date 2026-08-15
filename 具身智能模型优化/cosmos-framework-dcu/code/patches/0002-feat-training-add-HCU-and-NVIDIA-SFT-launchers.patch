@@ -1,0 +1,1911 @@
+From a24f78fba8ca3c3a79334903abce1845d46b728d Mon Sep 17 00:00:00 2001
+From: iMountTai <2506700016@qq.com>
+Date: Fri, 31 Jul 2026 11:09:12 +0800
+Subject: [PATCH 2/6] feat(training): add HCU and NVIDIA SFT launchers
+
+---
+ .../action/datasets/action_sft_dataset.py     |   2 +
+ .../action/datasets/cosmos3_action_lerobot.py |   3 +
+ .../action/datasets/droid_lerobot_dataset.py  |   2 +
+ cosmos_framework/inference/args.py            |   4 +-
+ cosmos_framework/inference/common/args.py     |   3 +-
+ .../inference/common/inference.py             |   3 +-
+ cosmos_framework/inference/inference.py       |   4 +-
+ cosmos_framework/inference/model.py           |  16 +-
+ cosmos_framework/model/attention/backends.py  |  18 --
+ .../scripts/convert_model_to_dcp.py           |  25 ++
+ cosmos_framework/scripts/train.py             |  11 +-
+ cosmos_framework/utils/checkpoint_db.py       |   5 +
+ examples/_sft_launcher_common.sh              |  45 +++-
+ examples/_sft_nvidia_local_common.sh          |  32 +++
+ .../launch_sft_action_policy_droid_hcu.sh     |  87 +++++++
+ ...ch_sft_action_policy_droid_nvidia_local.sh |  54 ++++
+ ...launch_sft_action_policy_libero_all_hcu.sh |  69 +++++
+ ...t_action_policy_libero_all_nvidia_local.sh |  41 +++
+ .../launch_sft_action_policy_libero_hcu.sh    |  69 +++++
+ ...h_sft_action_policy_libero_nvidia_local.sh |  41 +++
+ ...erator_vision_nano_cosmosdataloader_hcu.sh |  63 +++++
+ ...sion_nano_cosmosdataloader_nvidia_local.sh |  33 +++
+ .../launch_sft_generator_vision_nano_hcu.sh   |  57 +++--
+ ..._sft_generator_vision_nano_nvidia_local.sh |  31 +++
+ .../launch_sft_generator_vision_super_hcu.sh  |  73 ++++++
+ ...sft_generator_vision_super_nvidia_local.sh |  40 +++
+ examples/launch_sft_reasoner_llava_ov_hcu.sh  |  70 ++++++
+ ...unch_sft_reasoner_llava_ov_nvidia_local.sh |  40 +++
+ .../launch_sft_reasoner_videophy2_nano_hcu.sh |  55 ++--
+ ...ft_reasoner_videophy2_nano_nvidia_local.sh |  35 +++
+ examples/launch_sft_vision_nano_local.sh      |   5 +
+ examples/summarize_sft_perf.py                | 237 ++++++++++++++++++
+ .../sft_config/action_policy_droid_nano.toml  |  66 +++++
+ .../action_policy_libero_10_nano.toml         |  46 ++++
+ .../action_policy_libero_all_nano.toml        |  49 ++++
+ 35 files changed, 1365 insertions(+), 69 deletions(-)
+ create mode 100644 examples/_sft_nvidia_local_common.sh
+ create mode 100644 examples/launch_sft_action_policy_droid_hcu.sh
+ create mode 100644 examples/launch_sft_action_policy_droid_nvidia_local.sh
+ create mode 100644 examples/launch_sft_action_policy_libero_all_hcu.sh
+ create mode 100644 examples/launch_sft_action_policy_libero_all_nvidia_local.sh
+ create mode 100644 examples/launch_sft_action_policy_libero_hcu.sh
+ create mode 100644 examples/launch_sft_action_policy_libero_nvidia_local.sh
+ create mode 100644 examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+ create mode 100644 examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+ create mode 100644 examples/launch_sft_generator_vision_nano_nvidia_local.sh
+ create mode 100644 examples/launch_sft_generator_vision_super_hcu.sh
+ create mode 100644 examples/launch_sft_generator_vision_super_nvidia_local.sh
+ create mode 100644 examples/launch_sft_reasoner_llava_ov_hcu.sh
+ create mode 100644 examples/launch_sft_reasoner_llava_ov_nvidia_local.sh
+ create mode 100644 examples/launch_sft_reasoner_videophy2_nano_nvidia_local.sh
+ create mode 100644 examples/launch_sft_vision_nano_local.sh
+ create mode 100644 examples/summarize_sft_perf.py
+ create mode 100644 examples/toml/sft_config/action_policy_droid_nano.toml
+ create mode 100644 examples/toml/sft_config/action_policy_libero_10_nano.toml
+ create mode 100644 examples/toml/sft_config/action_policy_libero_all_nano.toml
+
+diff --git a/cosmos_framework/data/generator/action/datasets/action_sft_dataset.py b/cosmos_framework/data/generator/action/datasets/action_sft_dataset.py
+index 6053259..7e726e4 100644
+--- a/cosmos_framework/data/generator/action/datasets/action_sft_dataset.py
++++ b/cosmos_framework/data/generator/action/datasets/action_sft_dataset.py
+@@ -115,6 +115,7 @@ def get_action_droid_sft_dataset(
+     iterable_shuffle: bool = False,
+     episode_shuffle_seed: int = 42,
+     use_success_only: bool = True,
++    video_backend: str | None = None,
+ ) -> Dataset:
+     """Build the DROID action SFT dataset: ``action_space='joint_pos'`` (8D) +
+     ``use_state`` (raw/un-normalized), concat_view, chunk_length 32.
+@@ -133,6 +134,7 @@ def get_action_droid_sft_dataset(
+         use_filter_dict=use_filter_dict,
+         filter_dict_path=filter_dict_path,
+         use_success_only=use_success_only,
++        video_backend=video_backend,
+     )
+     dataset: Dataset = DROIDLeRobotDataset(root=root, **shard_kwargs)
+     transform = ActionTransformPipeline(
+diff --git a/cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py b/cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py
+index d74b2ae..83f94e1 100644
+--- a/cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py
++++ b/cosmos_framework/data/generator/action/datasets/cosmos3_action_lerobot.py
+@@ -322,6 +322,7 @@ class BaseActionLeRobotDataset(Dataset):
+         tolerance_s: float = 1e-4,
+         max_loaded_datasets: int = _LRU_DATASET_MAX_LOADED,
+         skip_video_loading: bool = False,
++        video_backend: str | None = None,
+         sample_stride: int = 1,
+         enable_fast_init: bool = False,
+         fast_init_max_workers: int = 64,
+@@ -358,6 +359,7 @@ class BaseActionLeRobotDataset(Dataset):
+             self._tolerance_s = tolerance_s
+             self._max_loaded_datasets = max_loaded_datasets
+             self._skip_video_loading = skip_video_loading
++            self._video_backend = video_backend
+             self._sample_stride = sample_stride
+             self._enable_fast_init = enable_fast_init
+             self._fast_init_max_workers = fast_init_max_workers
+@@ -619,6 +621,7 @@ class BaseActionLeRobotDataset(Dataset):
+                 root=root,
+                 delta_timestamps=self._delta_timestamps,
+                 tolerance_s=self._tolerance_s,
++                video_backend=self._video_backend,
+                 dataset_label=label,
+                 prefetched_meta=meta,
+             )
+diff --git a/cosmos_framework/data/generator/action/datasets/droid_lerobot_dataset.py b/cosmos_framework/data/generator/action/datasets/droid_lerobot_dataset.py
+index 64e2e12..9f76021 100644
+--- a/cosmos_framework/data/generator/action/datasets/droid_lerobot_dataset.py
++++ b/cosmos_framework/data/generator/action/datasets/droid_lerobot_dataset.py
+@@ -76,6 +76,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
+         tolerance_s=2e-4,
+         viewpoint: Viewpoint = "concat_view",
+         use_success_only: bool = False,
++        video_backend: str | None = None,
+         video_mode: str | None = None,  # TODO (ychao): remove
+         action_space: str = "midtrain",  # TODO (ychao): remove
+         use_state: bool = False,
+@@ -99,6 +100,7 @@ class DROIDLeRobotDataset(BaseActionLeRobotDataset):
+             rotation_format="rot6d",
+             action_normalization=action_normalization,
+             tolerance_s=tolerance_s,
++            video_backend=video_backend,
+             enable_fast_init=enable_fast_init,
+         )
+         self._use_success_only = use_success_only
+diff --git a/cosmos_framework/inference/args.py b/cosmos_framework/inference/args.py
+index 4ef9092..8382ad3 100644
+--- a/cosmos_framework/inference/args.py
++++ b/cosmos_framework/inference/args.py
+@@ -6,11 +6,11 @@ import math
+ import os
+ from functools import cache
+ from pathlib import Path
+-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Self, cast, override
++from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
+ 
+ import pydantic
+ import pynvml
+-from typing_extensions import assert_never
++from typing_extensions import Self, assert_never, override
+ from tyro.conf import Suppress
+ 
+ from cosmos_framework.inference.common.args import (
+diff --git a/cosmos_framework/inference/common/args.py b/cosmos_framework/inference/common/args.py
+index 4fa87c9..003de22 100644
+--- a/cosmos_framework/inference/common/args.py
++++ b/cosmos_framework/inference/common/args.py
+@@ -22,7 +22,6 @@ from typing import (
+     NoReturn,
+     TypeVar,
+     overload,
+-    override,
+ )
+ 
+ import omegaconf
+@@ -30,7 +29,7 @@ import pydantic
+ import tyro
+ import yaml
+ from omegaconf import OmegaConf
+-from typing_extensions import Self, assert_never
++from typing_extensions import Self, assert_never, override
+ from tyro.conf import Suppress
+ 
+ from cosmos_framework.inference.common.config import deserialize_config_dict, structure_config, unstructure_config
+diff --git a/cosmos_framework/inference/common/inference.py b/cosmos_framework/inference/common/inference.py
+index c492756..2efecd5 100644
+--- a/cosmos_framework/inference/common/inference.py
++++ b/cosmos_framework/inference/common/inference.py
+@@ -8,10 +8,11 @@ from abc import ABC, abstractmethod
+ from collections.abc import Iterator
+ from contextlib import contextmanager, nullcontext
+ from dataclasses import dataclass
+-from typing import TYPE_CHECKING, Any, ContextManager, Self, Sequence, final
++from typing import TYPE_CHECKING, Any, ContextManager, Sequence, final
+ 
+ import torch
+ import torch.profiler
++from typing_extensions import Self
+ 
+ from cosmos_framework.inference.common.args import GuardrailArgs, SampleArgs, SampleOutputs, SetupArgs
+ from cosmos_framework.inference.common.init import is_rank0
+diff --git a/cosmos_framework/inference/inference.py b/cosmos_framework/inference/inference.py
+index a7f338c..e28e6d7 100644
+--- a/cosmos_framework/inference/inference.py
++++ b/cosmos_framework/inference/inference.py
+@@ -7,7 +7,7 @@ import pickle
+ from collections.abc import Callable, Generator, Iterable
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar, cast, override
++from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar, cast
+ 
+ import attrs
+ import cattrs
+@@ -19,7 +19,7 @@ from PIL import Image
+ from qwen_vl_utils.vision_process import smart_nframes
+ from torch.utils._pytree import tree_map_only
+ from torch.utils.data import Dataset
+-from typing_extensions import Self
++from typing_extensions import Self, override
+ 
+ from cosmos_framework.configs.base.defaults.compile import CompileConfig
+ from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
+diff --git a/cosmos_framework/inference/model.py b/cosmos_framework/inference/model.py
+index e9c38b4..dbd96a5 100644
+--- a/cosmos_framework/inference/model.py
++++ b/cosmos_framework/inference/model.py
+@@ -3,6 +3,7 @@
+ 
+ import contextlib
+ import json
++import os
+ import re
+ from pathlib import Path
+ from typing import Any
+@@ -45,13 +46,24 @@ from cosmos_framework.inference.common.public_model_config import (
+ from cosmos_framework.utils import misc
+ from cosmos_framework.utils.flags import SMOKE
+ 
++
++@contextlib.contextmanager
++def _chdir(path: Path):
++    """Python 3.10-compatible equivalent of contextlib.chdir."""
++    previous = Path.cwd()
++    os.chdir(path)
++    try:
++        yield
++    finally:
++        os.chdir(previous)
++
+ if TYPE_CHECKING:
+     from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
+ 
+ 
+ # Resolve to the release-tree root so relative-path checkpoint config entries
+ # (e.g. `cosmos_framework/model/generator/vlm/qwen3_vl/configs/Qwen3-VL-8B-Instruct.json`) load
+-# correctly under contextlib.chdir(_ROOT_DIR) in __init__. In the original
++# correctly under _chdir(_ROOT_DIR) in __init__. In the original
+ # cosmos3 release the cosmos3 package lives at the tree root, so parents[1] is
+ # the release root. In the cosmos_training release the package lives at
+ # cosmos_framework/inference/, so the release root is one level higher (parents[2]).
+@@ -437,7 +449,7 @@ class Cosmos3OmniModel(transformers.PreTrainedModel):
+                 vlm_dict.config.text_config_overrides = {"num_hidden_layers": 2, "num_window_layers": 2}
+ 
+         # The model loads some files by relative path 'cosmos3/...'
+-        with contextlib.chdir(_ROOT_DIR):
++        with _chdir(_ROOT_DIR):
+             self.model: "OmniMoTModel" = hydra.utils.instantiate(model_dict)
+         self.after_load_model(self.model)
+ 
+diff --git a/cosmos_framework/model/attention/backends.py b/cosmos_framework/model/attention/backends.py
+index af7d83d..f674e01 100644
+--- a/cosmos_framework/model/attention/backends.py
++++ b/cosmos_framework/model/attention/backends.py
+@@ -225,24 +225,6 @@ def choose_backend(
+ 
+     arch_tag = get_arch_tag(device)
+     backend_list = get_backend_list(arch_tag)
+-    log.debug(f"[ATTN_DEBUG] backend_list={backend_list}")
+-
+-    for b in backend_list:
+-        ok = is_backend_compatible(
+-            backend=b,
+-            query_shape=query_shape,
+-            key_shape=key_shape,
+-            value_shape=value_shape,
+-            dtype=dtype,
+-            device=device,
+-            requires_grad=requires_grad,
+-            is_causal=is_causal,
+-            causal_type=causal_type,
+-            is_varlen=is_varlen,
+-            deterministic=deterministic,
+-            raise_error=False,
+-        )
+-        log.debug(f"[ATTN_DEBUG] candidate={b} compatible={ok}")
+     for backend in backend_list:
+         if is_backend_compatible(
+             backend=backend,
+diff --git a/cosmos_framework/scripts/convert_model_to_dcp.py b/cosmos_framework/scripts/convert_model_to_dcp.py
+index 2c78397..f115846 100644
+--- a/cosmos_framework/scripts/convert_model_to_dcp.py
++++ b/cosmos_framework/scripts/convert_model_to_dcp.py
+@@ -12,6 +12,7 @@ init_script(
+ )
+ 
+ import math
++import os
+ import shutil
+ from typing import Annotated
+ 
+@@ -50,6 +51,28 @@ def _redirect_avae_to_local(hf_path):
+         avae.hf._path = str(sound_tokenizer_dir)
+ 
+ 
++def _redirect_vlm_processor_to_local(config: Cosmos3OmniConfig, hf_path):
++    """Use processor files bundled with a local Cosmos3 HF checkpoint."""
++    tokenizer = config.model.get("config", {}).get("vlm_config", {}).get("tokenizer", {})
++    if not isinstance(tokenizer, dict) or not (hf_path / "tokenizer.json").is_file():
++        return
++    tokenizer["local_processor_dir"] = str(hf_path)
++    tokenizer["config_variant"] = "hf"
++
++
++def _redirect_video_vae_to_local(config: Cosmos3OmniConfig):
++    """Use a local Wan2.2 VAE when WAN_VAE_PATH is provided."""
++    vae_path = os.environ.get("WAN_VAE_PATH")
++    if not vae_path:
++        return
++    if not os.path.isfile(vae_path):
++        raise FileNotFoundError(f"WAN_VAE_PATH not found: {vae_path}")
++    tokenizer = config.model.get("config", {}).get("tokenizer", {})
++    tokenizer["vae_path"] = vae_path
++    tokenizer["bucket_name"] = ""
++    tokenizer["object_store_credential_path_pretrained"] = ""
++
++
+ class Args(pydantic.BaseModel):
+     checkpoint: CheckpointOverrides
+     """Hugging Face checkpoint."""
+@@ -64,6 +87,8 @@ def convert_model_to_dcp(args: Args):
+     _redirect_avae_to_local(hf_path)
+     model_dict = checkpoint_config.load_model_config_dict()
+     hf_config = Cosmos3OmniConfig(model=build_public_model_config(model_dict))
++    _redirect_vlm_processor_to_local(hf_config, hf_path)
++    _redirect_video_vae_to_local(hf_config)
+     hf_model = Cosmos3OmniModel.from_pretrained_dcp(hf_path, config=hf_config)
+     state_dict = get_model_state_dict(hf_model.model)
+ 
+diff --git a/cosmos_framework/scripts/train.py b/cosmos_framework/scripts/train.py
+index 8a4b917..d6514ea 100644
+--- a/cosmos_framework/scripts/train.py
++++ b/cosmos_framework/scripts/train.py
+@@ -75,13 +75,16 @@ def _install_torchcodec_pyav_fallback() -> None:
+             elif hasattr(source, "read") and hasattr(source, "seek"):
+                 source.seek(0)
+ 
+-            container = av.open(source)
+-            stream = container.streams.video[0]
+-            frames = [torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1) for frame in container.decode(stream)]
++            with av.open(source) as container:
++                stream = container.streams.video[0]
++                frames = [
++                    torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1)
++                    for frame in container.decode(stream)
++                ]
++                fps = float(stream.average_rate) if stream.average_rate else 30.0
+             if not frames:
+                 raise ValueError("video has zero frames")
+             self._frames = torch.stack(frames)
+-            fps = float(stream.average_rate) if stream.average_rate else 30.0
+             _, height, width = self._frames.shape[1:]
+             self.metadata = types.SimpleNamespace(
+                 num_frames=len(frames),
+diff --git a/cosmos_framework/utils/checkpoint_db.py b/cosmos_framework/utils/checkpoint_db.py
+index 580f92f..3a2276f 100644
+--- a/cosmos_framework/utils/checkpoint_db.py
++++ b/cosmos_framework/utils/checkpoint_db.py
+@@ -447,6 +447,11 @@ def download_checkpoint_v2(checkpoint_uri: str, *, check_exists: bool = True) ->
+ 
+     Similar to 'download_checkpoint', but unknown S3 URIs are passed through.
+     """
++    # Prefer an existing local path over registry lookup. A local file may have
++    # the same basename as a registered checkpoint (for example
++    # Wan2.2_VAE.pth) and must not be rewritten to its remote URI.
++    if os.path.exists(checkpoint_uri):
++        return checkpoint_uri
+     if INTERNAL:
+         return checkpoint_uri
+     if (checkpoint := CheckpointConfig.maybe_from_uri(sanitize_uri(checkpoint_uri))) is not None:
+diff --git a/examples/_sft_launcher_common.sh b/examples/_sft_launcher_common.sh
+index 5920ae8..48b90f3 100644
+--- a/examples/_sft_launcher_common.sh
++++ b/examples/_sft_launcher_common.sh
+@@ -26,6 +26,9 @@
+ #                        has no torchrun env fallback, so it must be passed here).
+ #   LOG_FILENAME         override $LOG_DIR/${LOG_FILENAME}
+ #                        (default <toml-stem>_sft.log).
++#   PERF_RECORD_ENABLED  when true, write JSON/Markdown summaries next to logs.
++#   PERF_PLATFORM        platform label stored in the performance summary.
++#   PERF_WARMUP_ITERS    iterations excluded from steady-state statistics.
+ #
+ # Absolute paths are passed through; relative paths are anchored to the repo
+ # root (the parent of this examples/ directory). Paths set in the caller's
+@@ -95,6 +98,16 @@ TORCHRUN_ARGS=(--nproc_per_node="${NPROC_PER_NODE:-8}" --master_port="${MASTER_P
+ [[ -n "${NODE_RANK:-}" ]]   && TORCHRUN_ARGS+=(--node_rank="$NODE_RANK")
+ [[ -n "${MASTER_ADDR:-}" ]] && TORCHRUN_ARGS+=(--master_addr="$MASTER_ADDR")
+ 
++PERF_START_EPOCH="$(date +%s)"
++PERF_GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
++echo ">>> $(date '+%H:%M:%S') git commit: $PERF_GIT_COMMIT"
++echo ">>> $(date '+%H:%M:%S') platform:   ${PERF_PLATFORM:-unspecified}"
++echo ">>> $(date '+%H:%M:%S') topology:   nproc_per_node=${NPROC_PER_NODE:-8} devices=${PERF_VISIBLE_DEVICES:-unspecified}"
++
++_SFT_COMMON_HAD_ERREXIT=false
++case $- in
++    *e*) _SFT_COMMON_HAD_ERREXIT=true; set +e ;;
++esac
+ IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
+     torchrun "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
+     --sft-toml="$TOML_FILE" \
+@@ -102,5 +115,35 @@ IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
+     2>&1 | tee "$LOG_FILE"
+ 
+ EXIT_CODE=${PIPESTATUS[0]}
+-echo ">>> $(date '+%H:%M:%S') Done (exit $EXIT_CODE)"
++if [[ "$_SFT_COMMON_HAD_ERREXIT" == "true" ]]; then
++    set -e
++fi
++PERF_END_EPOCH="$(date +%s)"
++echo ">>> $(date '+%H:%M:%S') Done (exit $EXIT_CODE, wall time $((PERF_END_EPOCH - PERF_START_EPOCH))s)"
++
++if [[ "${PERF_RECORD_ENABLED:-false}" == "true" ]]; then
++    PERF_RUN_NAME="${RUN_NAME:-$TOML_STEM}"
++    PERF_RECORD_DIR="${PERF_RECORD_DIR:-$OUTPUT_ROOT/perf}"
++    PERF_RECORD_FILE="${PERF_RECORD_FILE:-$PERF_RECORD_DIR/${PERF_RUN_NAME}.json}"
++    PERF_ARGS=(
++        --log "$LOG_FILE"
++        --output "$PERF_RECORD_FILE"
++        --platform "${PERF_PLATFORM:-unspecified}"
++        --run-name "$PERF_RUN_NAME"
++        --devices "${PERF_VISIBLE_DEVICES:-unspecified}"
++        --nproc "${NPROC_PER_NODE:-8}"
++        --warmup-iters "${PERF_WARMUP_ITERS:-10}"
++        --start-epoch "$PERF_START_EPOCH"
++        --end-epoch "$PERF_END_EPOCH"
++        --exit-code "$EXIT_CODE"
++        --toml "$TOML_FILE"
++        --git-commit "$PERF_GIT_COMMIT"
++    )
++    [[ -n "${MAX_ITER:-}" ]] && PERF_ARGS+=(--max-iter "$MAX_ITER")
++    for _override in "${TAIL_OVERRIDES[@]}"; do
++        PERF_ARGS+=(--override "$_override")
++    done
++    python "$WORKDIR/examples/summarize_sft_perf.py" "${PERF_ARGS[@]}" ||
++        echo "WARNING: performance summary generation failed; raw log is preserved at $LOG_FILE" >&2
++fi
+ exit $EXIT_CODE
+diff --git a/examples/_sft_nvidia_local_common.sh b/examples/_sft_nvidia_local_common.sh
+new file mode 100644
+index 0000000..10fd1a5
+--- /dev/null
++++ b/examples/_sft_nvidia_local_common.sh
+@@ -0,0 +1,32 @@
++# Shared NVIDIA single-node defaults for local-asset performance launchers.
++
++: "${CUDA_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${VLM_TOKENIZER_PATH:=/public/opendas/DL_DATA/llm-models/Qwen3-VL-8B-Instruct}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++[[ -f "$VLM_TOKENIZER_PATH/vocab.json" ]] || { echo "ERROR: missing $VLM_TOKENIZER_PATH/vocab.json" >&2; exit 1; }
++[[ -f "$VLM_TOKENIZER_PATH/merges.txt" ]] || { echo "ERROR: missing $VLM_TOKENIZER_PATH/merges.txt" >&2; exit 1; }
++
++CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$CUDA_VISIBLE_DEVICES" || "$CUDA_VISIBLE_DEVICES" == ,* || "$CUDA_VISIBLE_DEVICES" == *, || "$CUDA_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: CUDA_VISIBLE_DEVICES must be a comma-separated list without empty entries: $CUDA_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a NVIDIA_DEVICE_IDS <<< "$CUDA_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#NVIDIA_DEVICE_IDS[@]}
++
++export CUDA_VISIBLE_DEVICES
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++# The official CUDA environment recommends clearing host CUDA/NCCL paths.
++export LD_LIBRARY_PATH="${NVIDIA_LD_LIBRARY_PATH:-}"
++
++PERF_PLATFORM="${PERF_PLATFORM:-nvidia_h20}"
++PERF_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
++
++echo ">>> NVIDIA devices: ${CUDA_VISIBLE_DEVICES}"
++echo ">>> Processes per node: ${NPROC_PER_NODE}"
+diff --git a/examples/launch_sft_action_policy_droid_hcu.sh b/examples/launch_sft_action_policy_droid_hcu.sh
+new file mode 100644
+index 0000000..6e2634c
+--- /dev/null
++++ b/examples/launch_sft_action_policy_droid_hcu.sh
+@@ -0,0 +1,87 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Cosmos3-Nano DROID Action Policy SFT recipe.
++# One launcher covers short validation and longer runs through env overrides.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/action_policy_droid_nano.toml}"
++: "${DROID_ROOT:=/root/Cosmos3/datasets/droid_plus_lerobot_640x360_20260412}"
++: "${BASE_CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${LOCAL_PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano}"
++: "${RUN_NAME:=action_policy_droid_nano_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29716}"
++: "${MAX_ITER:=70}"
++: "${MAX_SAMPLES_PER_BATCH:=32}"
++: "${NUM_WORKERS:=16}"
++: "${COMPILE_TOKENIZER_ENABLED:=true}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${KEEP_RANGES_PATH:=}"
++: "${VIDEO_BACKEND:=pyav}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
++export DROID_ROOT
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
++
++EXTRA_DATASET_CHECK='[[ -f "$DROID_ROOT/success/meta/info.json" ]] || { echo "ERROR: missing $DROID_ROOT/success/meta/info.json; prepare the Cosmos3-DROID success split first" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++[[ -d "$LOCAL_PROCESSOR_DIR" ]] || { echo "ERROR: missing local processor directory $LOCAL_PROCESSOR_DIR" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "model.config.parallelism.data_parallel_replicate_degree=1"
++    "dataloader_train.max_samples_per_batch=${MAX_SAMPLES_PER_BATCH}"
++    "dataloader_train.dataloader.num_workers=${NUM_WORKERS}"
++    "model.config.rectified_flow_training_config.loss_scale=10.0"
++    "dataloader_train.dataloader.datasets.droid.dataset.video_backend=${VIDEO_BACKEND}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "trainer.callbacks.compile_tokenizer.enabled=${COMPILE_TOKENIZER_ENABLED}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++if [[ -n "$KEEP_RANGES_PATH" ]]; then
++    [[ -f "$KEEP_RANGES_PATH" ]] || { echo "ERROR: KEEP_RANGES_PATH not found: $KEEP_RANGES_PATH" >&2; exit 1; }
++    TAIL_OVERRIDES+=(
++        "dataloader_train.dataloader.datasets.droid.dataset.use_filter_dict=true"
++        "dataloader_train.dataloader.datasets.droid.dataset.filter_dict_path=${KEEP_RANGES_PATH}"
++    )
++fi
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node / FSDP shard degree: ${NPROC_PER_NODE}"
++echo ">>> Max iterations: ${MAX_ITER}"
++echo ">>> Max samples per packed batch: ${MAX_SAMPLES_PER_BATCH}"
++echo ">>> Async DCP save: ${DCP_ASYNC_MODE_ENABLED}"
++echo ">>> Video backend: ${VIDEO_BACKEND}"
++if [[ -n "$KEEP_RANGES_PATH" ]]; then
++    echo ">>> DROID keep-ranges filter: ${KEEP_RANGES_PATH}"
++fi
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_action_policy_droid_nvidia_local.sh b/examples/launch_sft_action_policy_droid_nvidia_local.sh
+new file mode 100644
+index 0000000..6d7695e
+--- /dev/null
++++ b/examples/launch_sft_action_policy_droid_nvidia_local.sh
+@@ -0,0 +1,54 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-asset mirror of the HCU DROID Action Policy run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/action_policy_droid_nano.toml}"
++: "${DROID_ROOT:=/data/datasets/droid_plus_lerobot_640x360_20260412}"
++: "${BASE_CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${RUN_NAME:=action_policy_droid_nano_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30716}"
++: "${MAX_ITER:=70}"
++: "${MAX_SAMPLES_PER_BATCH:=32}"
++: "${NUM_WORKERS:=16}"
++: "${COMPILE_TOKENIZER_ENABLED:=true}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${KEEP_RANGES_PATH:=}"
++: "${VIDEO_BACKEND:=torchcodec}"
++
++export DROID_ROOT
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++EXTRA_DATASET_CHECK='[[ -f "$DROID_ROOT/success/meta/info.json" ]] || { echo "ERROR: missing $DROID_ROOT/success/meta/info.json" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "model.config.parallelism.data_parallel_replicate_degree=1"
++    "dataloader_train.max_samples_per_batch=${MAX_SAMPLES_PER_BATCH}"
++    "dataloader_train.dataloader.num_workers=${NUM_WORKERS}"
++    "model.config.rectified_flow_training_config.loss_scale=10.0"
++    "dataloader_train.dataloader.datasets.droid.dataset.video_backend=${VIDEO_BACKEND}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "trainer.callbacks.compile_tokenizer.enabled=${COMPILE_TOKENIZER_ENABLED}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++if [[ -n "$KEEP_RANGES_PATH" ]]; then
++    [[ -f "$KEEP_RANGES_PATH" ]] || { echo "ERROR: KEEP_RANGES_PATH not found: $KEEP_RANGES_PATH" >&2; exit 1; }
++    TAIL_OVERRIDES+=(
++        "dataloader_train.dataloader.datasets.droid.dataset.use_filter_dict=true"
++        "dataloader_train.dataloader.datasets.droid.dataset.filter_dict_path=${KEEP_RANGES_PATH}"
++    )
++fi
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_action_policy_libero_all_hcu.sh b/examples/launch_sft_action_policy_libero_all_hcu.sh
+new file mode 100644
+index 0000000..4b74f06
+--- /dev/null
++++ b/examples/launch_sft_action_policy_libero_all_hcu.sh
+@@ -0,0 +1,69 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Cosmos3-Nano LIBERO-all Action Policy SFT recipe.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/action_policy_libero_all_nano.toml}"
++: "${LIBERO_ROOT:=/root/Cosmos3/datasets/LIBERO_LeRobot_v3}"
++: "${BASE_CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${LOCAL_PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano}"
++: "${RUN_NAME:=action_policy_libero_all_nano_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29718}"
++: "${MAX_ITER:=70}"
++: "${MAX_SAMPLES_PER_BATCH:=32}"
++: "${NUM_WORKERS:=4}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
++export LIBERO_ROOT
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
++
++EXTRA_DATASET_CHECK='for _suite in libero_spatial libero_object libero_goal libero_10; do [[ -f "$LIBERO_ROOT/$_suite/meta/info.json" ]] || { echo "ERROR: missing $LIBERO_ROOT/$_suite/meta/info.json; download all suites of nvidia/LIBERO_LeRobot_v3" >&2; exit 1; }; done
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++[[ -d "$LOCAL_PROCESSOR_DIR" ]] || { echo "ERROR: missing local processor directory $LOCAL_PROCESSOR_DIR" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "model.config.parallelism.data_parallel_replicate_degree=1"
++    "dataloader_train.max_samples_per_batch=${MAX_SAMPLES_PER_BATCH}"
++    "dataloader_train.dataloader.num_workers=${NUM_WORKERS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node / FSDP shard degree: ${NPROC_PER_NODE}"
++echo ">>> Max iterations: ${MAX_ITER}"
++echo ">>> Max samples per packed batch: ${MAX_SAMPLES_PER_BATCH}"
++echo ">>> Async DCP save: ${DCP_ASYNC_MODE_ENABLED}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_action_policy_libero_all_nvidia_local.sh b/examples/launch_sft_action_policy_libero_all_nvidia_local.sh
+new file mode 100644
+index 0000000..8dd6720
+--- /dev/null
++++ b/examples/launch_sft_action_policy_libero_all_nvidia_local.sh
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-asset mirror of the HCU LIBERO-all Action Policy run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/action_policy_libero_all_nano.toml}"
++: "${LIBERO_ROOT:=/data/datasets/LIBERO_LeRobot_v3}"
++: "${BASE_CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${RUN_NAME:=action_policy_libero_all_nano_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30718}"
++: "${MAX_ITER:=70}"
++: "${MAX_SAMPLES_PER_BATCH:=32}"
++: "${NUM_WORKERS:=4}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++
++export LIBERO_ROOT
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++EXTRA_DATASET_CHECK='for _suite in libero_spatial libero_object libero_goal libero_10; do [[ -f "$LIBERO_ROOT/$_suite/meta/info.json" ]] || { echo "ERROR: missing $LIBERO_ROOT/$_suite/meta/info.json" >&2; exit 1; }; done
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "model.config.parallelism.data_parallel_replicate_degree=1"
++    "dataloader_train.max_samples_per_batch=${MAX_SAMPLES_PER_BATCH}"
++    "dataloader_train.dataloader.num_workers=${NUM_WORKERS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_action_policy_libero_hcu.sh b/examples/launch_sft_action_policy_libero_hcu.sh
+new file mode 100644
+index 0000000..3916cfc
+--- /dev/null
++++ b/examples/launch_sft_action_policy_libero_hcu.sh
+@@ -0,0 +1,69 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Cosmos3-Nano LIBERO-10 Action Policy SFT recipe.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/action_policy_libero_10_nano.toml}"
++: "${LIBERO_ROOT:=/root/Cosmos3/datasets/LIBERO_LeRobot_v3/libero_10}"
++: "${BASE_CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${LOCAL_PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano}"
++: "${RUN_NAME:=action_policy_libero_10_nano_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29717}"
++: "${MAX_ITER:=70}"
++: "${MAX_SAMPLES_PER_BATCH:=32}"
++: "${NUM_WORKERS:=4}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
++export LIBERO_ROOT
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
++
++EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: missing $LIBERO_ROOT/meta/info.json; download the libero_10 subset of nvidia/LIBERO_LeRobot_v3" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++[[ -d "$LOCAL_PROCESSOR_DIR" ]] || { echo "ERROR: missing local processor directory $LOCAL_PROCESSOR_DIR" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "model.config.parallelism.data_parallel_replicate_degree=1"
++    "dataloader_train.max_samples_per_batch=${MAX_SAMPLES_PER_BATCH}"
++    "dataloader_train.dataloader.num_workers=${NUM_WORKERS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node / FSDP shard degree: ${NPROC_PER_NODE}"
++echo ">>> Max iterations: ${MAX_ITER}"
++echo ">>> Max samples per packed batch: ${MAX_SAMPLES_PER_BATCH}"
++echo ">>> Async DCP save: ${DCP_ASYNC_MODE_ENABLED}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_action_policy_libero_nvidia_local.sh b/examples/launch_sft_action_policy_libero_nvidia_local.sh
+new file mode 100644
+index 0000000..5cbe243
+--- /dev/null
++++ b/examples/launch_sft_action_policy_libero_nvidia_local.sh
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-asset mirror of the HCU LIBERO-10 Action Policy run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/action_policy_libero_10_nano.toml}"
++: "${LIBERO_ROOT:=/data/datasets/LIBERO_LeRobot_v3/libero_10}"
++: "${BASE_CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${RUN_NAME:=action_policy_libero_10_nano_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30717}"
++: "${MAX_ITER:=70}"
++: "${MAX_SAMPLES_PER_BATCH:=32}"
++: "${NUM_WORKERS:=4}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++
++export LIBERO_ROOT
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: missing $LIBERO_ROOT/meta/info.json" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "model.config.parallelism.data_parallel_replicate_degree=1"
++    "dataloader_train.max_samples_per_batch=${MAX_SAMPLES_PER_BATCH}"
++    "dataloader_train.dataloader.num_workers=${NUM_WORKERS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh b/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+new file mode 100644
+index 0000000..4879320
+--- /dev/null
++++ b/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Generator Vision Nano CosmosDataLoader recipe.
++# This is the only launcher for both short validation and longer runs: override
++# MAX_ITER/CHECKPOINT_SAVE_ITER or append Hydra overrides on the command line.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml}"
++: "${DATASET_PATH:=/data/Cosmos/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
++: "${BASE_CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${LOCAL_PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano}"
++: "${RUN_NAME:=generator_vision_sft_nano_cosmosdataloader_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29713}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${MAX_CAPTION_TOKENS:=2048}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
++
++EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
++    # Match the base Vision Nano recipe. The map-style experiment otherwise
++    # falls back to get_sft_dataset's 1024-token default and truncates captions.
++    "dataloader_train.distributor.datasets.video.dataset.max_caption_tokens=${MAX_CAPTION_TOKENS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node: ${NPROC_PER_NODE}"
++echo ">>> Max iterations: ${MAX_ITER}"
++echo ">>> Max caption tokens: ${MAX_CAPTION_TOKENS}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh b/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+new file mode 100644
+index 0000000..7a6cdf7
+--- /dev/null
++++ b/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 mirror of the HCU Vision Nano CosmosDataLoader run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml}"
++: "${DATASET_PATH:=/data/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
++: "${BASE_CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${RUN_NAME:=generator_vision_sft_nano_cosmosdataloader_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30713}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${MAX_CAPTION_TOKENS:=2048}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
++    "dataloader_train.distributor.datasets.video.dataset.max_caption_tokens=${MAX_CAPTION_TOKENS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_nano_hcu.sh b/examples/launch_sft_generator_vision_nano_hcu.sh
+index 04f007c..17cc5c0 100755
+--- a/examples/launch_sft_generator_vision_nano_hcu.sh
++++ b/examples/launch_sft_generator_vision_nano_hcu.sh
+@@ -1,28 +1,43 @@
+ #!/usr/bin/env bash
+ # HCU wrapper for the official Generator Vision Nano SFT recipe.
+ # Keep model/training/compile parameters in the official TOML; this file only
+-# supplies HCU topology and local data/checkpoint paths.
++# supplies HCU topology and local data/checkpoint paths. Script-level defaults
++# can be overridden with environment variables; recipe overrides can be passed
++# as positional arguments after the script name.
+ 
+ set -euo pipefail
+ 
+-TOML_FILE="examples/toml/sft_config/vision_sft_nano.toml"
+-
+-DATASET_PATH="/data/Cosmos/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge"
+-BASE_CHECKPOINT_PATH="/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP"
+-WAN_VAE_PATH="/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth"
+-LOCAL_PROCESSOR_DIR="/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano"
+-RUN_NAME="generator_vision_sft_nano_hcu_perf_4card"
+-OUTPUT_ROOT="/data/Cosmos/cosmos/outputs/hcu_training"
+-LOG_FILENAME="${RUN_NAME}.log"
+-HIP_VISIBLE_DEVICES="4,5,6,7"
+-NPROC_PER_NODE=4
+-MASTER_PORT=29712
+-
+-export COSMOS_TRAINING=true
+-export HF_HUB_OFFLINE=1
++: "${TOML_FILE:=examples/toml/sft_config/vision_sft_nano.toml}"
++: "${DATASET_PATH:=/data/Cosmos/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
++: "${BASE_CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${LOCAL_PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano}"
++: "${RUN_NAME:=generator_vision_sft_nano_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29712}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+ export HIP_VISIBLE_DEVICES
+-export OMP_NUM_THREADS=1
+-export PYTHONUNBUFFERED=1
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
+ 
+ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
+ [[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
+@@ -33,11 +48,13 @@ TAIL_OVERRIDES=(
+     "job.name=${RUN_NAME}"
+     "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
+     "trainer.seed=42"
+-    "trainer.max_iter=70"
+-    "checkpoint.save_iter=1000"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+ )
+ TAIL_OVERRIDES+=("$@")
+ 
+ echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node: ${NPROC_PER_NODE}"
++echo ">>> Max iterations: ${MAX_ITER}"
+ 
+ source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_nano_nvidia_local.sh b/examples/launch_sft_generator_vision_nano_nvidia_local.sh
+new file mode 100644
+index 0000000..70b623e
+--- /dev/null
++++ b/examples/launch_sft_generator_vision_nano_nvidia_local.sh
+@@ -0,0 +1,31 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-asset mirror of the HCU Generator Vision Nano run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/vision_sft_nano.toml}"
++: "${DATASET_PATH:=/data/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
++: "${BASE_CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${RUN_NAME:=generator_vision_sft_nano_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30712}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_super_hcu.sh b/examples/launch_sft_generator_vision_super_hcu.sh
+new file mode 100644
+index 0000000..78fddbf
+--- /dev/null
++++ b/examples/launch_sft_generator_vision_super_hcu.sh
+@@ -0,0 +1,73 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Generator Vision Super LoRA SFT recipe.
++# One launcher covers short validation and longer runs through env overrides.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/vision_sft_super.toml}"
++: "${DATASET_PATH:=/data/Cosmos/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
++: "${BASE_CHECKPOINT_PATH:=/root/Cosmos3/Cosmos3-Super-DCP}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${LOCAL_PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Super-Text2Image}"
++: "${RUN_NAME:=generator_vision_sft_super_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/root/Cosmos3/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29714}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++# Vision Super fixes context parallelism at two ranks, so WORLD_SIZE must be
++# divisible by two. The remaining ranks form the auto-sized FSDP shard mesh.
++if (( NPROC_PER_NODE < 2 || NPROC_PER_NODE % 2 != 0 )); then
++    echo "ERROR: Vision Super requires an even HCU count >= 2 for context parallelism=2; got ${NPROC_PER_NODE}" >&2
++    exit 2
++fi
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
++
++EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++[[ -d "$LOCAL_PROCESSOR_DIR" ]] || { echo "ERROR: missing local processor directory $LOCAL_PROCESSOR_DIR" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node: ${NPROC_PER_NODE}"
++echo ">>> Context parallel ranks: 2"
++echo ">>> Max iterations: ${MAX_ITER}"
++echo ">>> Async DCP save: ${DCP_ASYNC_MODE_ENABLED}"
++
++# Do not clear LD_LIBRARY_PATH here: the HCU/DTK runtime depends on its login
++# shell dynamic-library paths. The CUDA launcher clears it for a different
++# host-library isolation requirement.
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_generator_vision_super_nvidia_local.sh b/examples/launch_sft_generator_vision_super_nvidia_local.sh
+new file mode 100644
+index 0000000..6acb4e9
+--- /dev/null
++++ b/examples/launch_sft_generator_vision_super_nvidia_local.sh
+@@ -0,0 +1,40 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-asset mirror of the HCU Generator Vision Super LoRA run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/vision_sft_super.toml}"
++: "${DATASET_PATH:=/data/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge}"
++: "${BASE_CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Super-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${RUN_NAME:=generator_vision_sft_super_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30714}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++if (( NPROC_PER_NODE < 2 || NPROC_PER_NODE % 2 != 0 )); then
++    echo "ERROR: Vision Super requires an even GPU count >= 2 for context parallelism=2; got ${NPROC_PER_NODE}" >&2
++    exit 2
++fi
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
++
++EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }
++'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_reasoner_llava_ov_hcu.sh b/examples/launch_sft_reasoner_llava_ov_hcu.sh
+new file mode 100644
+index 0000000..2a12c89
+--- /dev/null
++++ b/examples/launch_sft_reasoner_llava_ov_hcu.sh
+@@ -0,0 +1,70 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official LLaVA-OneVision Reasoner SFT recipe.
++# The dataset is streamed from Hugging Face; no local dataset or DCP checkpoint
++# is required. Defaults can be overridden with environment variables, and
++# additional Hydra overrides can be passed as positional arguments.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/llava_ov.toml}"
++: "${VLM_MODEL_NAME:=/public/opendas/DL_DATA/llm-models/qwen3/Qwen3-VL-8B-Instruct}"
++: "${VLM_SAFETENSORS_PATH:=/data/Cosmos/checkpoints/Cosmos3-Nano-VLM}"
++: "${RUN_NAME:=reasoner_llava_ov_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29715}"
++: "${MAX_ITER:=70}"
++: "${MAX_TOKENS:=16000}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++# This recipe streams its dataset from Hugging Face, so offline mode must not
++# default to 1 even though model/tokenizer files are supplied locally.
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
++
++EXTRA_DATASET_CHECK='[[ -d "$VLM_MODEL_NAME" ]] || { echo "ERROR: VLM_MODEL_NAME not found: $VLM_MODEL_NAME" >&2; exit 1; }
++[[ -d "$VLM_SAFETENSORS_PATH" ]] || { echo "ERROR: VLM_SAFETENSORS_PATH not found: $VLM_SAFETENSORS_PATH" >&2; exit 1; }
++compgen -G "$VLM_SAFETENSORS_PATH/*.safetensors" >/dev/null || { echo "ERROR: no *.safetensors files under $VLM_SAFETENSORS_PATH" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.policy.backbone.model_name=${VLM_MODEL_NAME}"
++    "model.config.policy.backbone.safetensors_path=${VLM_SAFETENSORS_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "data_setting.max_tokens=${MAX_TOKENS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "scheduler.cycle_lengths=[${MAX_ITER}]"
++    "trainer.callbacks.log_tensor_shape.num_log=-1"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node: ${NPROC_PER_NODE}"
++echo ">>> Max iterations / scheduler cycle: ${MAX_ITER}"
++echo ">>> Max packed tokens: ${MAX_TOKENS}"
++echo ">>> Async DCP save: ${DCP_ASYNC_MODE_ENABLED}"
++echo ">>> Dataset: lmms-lab/LLaVA-OneVision-Data (Hugging Face streaming)"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_reasoner_llava_ov_nvidia_local.sh b/examples/launch_sft_reasoner_llava_ov_nvidia_local.sh
+new file mode 100644
+index 0000000..d75eb1f
+--- /dev/null
++++ b/examples/launch_sft_reasoner_llava_ov_nvidia_local.sh
+@@ -0,0 +1,40 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-model mirror of the HCU LLaVA-OneVision Nano run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/llava_ov.toml}"
++: "${VLM_MODEL_NAME:=/public/opendas/DL_DATA/llm-models/Qwen3-VL-8B-Instruct}"
++: "${VLM_SAFETENSORS_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-VLM}"
++: "${RUN_NAME:=reasoner_llava_ov_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30715}"
++: "${MAX_ITER:=70}"
++: "${MAX_TOKENS:=16000}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${DCP_ASYNC_MODE_ENABLED:=false}"
++: "${HF_HUB_OFFLINE:=0}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++
++EXTRA_DATASET_CHECK='[[ -d "$VLM_MODEL_NAME" ]] || { echo "ERROR: VLM_MODEL_NAME not found: $VLM_MODEL_NAME" >&2; exit 1; }
++[[ -d "$VLM_SAFETENSORS_PATH" ]] || { echo "ERROR: VLM_SAFETENSORS_PATH not found: $VLM_SAFETENSORS_PATH" >&2; exit 1; }
++compgen -G "$VLM_SAFETENSORS_PATH/*.safetensors" >/dev/null || { echo "ERROR: no *.safetensors files under $VLM_SAFETENSORS_PATH" >&2; exit 1; }'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.policy.backbone.model_name=${VLM_MODEL_NAME}"
++    "model.config.policy.backbone.safetensors_path=${VLM_SAFETENSORS_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "data_setting.max_tokens=${MAX_TOKENS}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "scheduler.cycle_lengths=[${MAX_ITER}]"
++    "trainer.callbacks.log_tensor_shape.num_log=-1"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++    "checkpoint.dcp_async_mode_enabled=${DCP_ASYNC_MODE_ENABLED}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_reasoner_videophy2_nano_hcu.sh b/examples/launch_sft_reasoner_videophy2_nano_hcu.sh
+index 50d334d..1c7e62a 100755
+--- a/examples/launch_sft_reasoner_videophy2_nano_hcu.sh
++++ b/examples/launch_sft_reasoner_videophy2_nano_hcu.sh
+@@ -1,28 +1,43 @@
+ #!/usr/bin/env bash
+ # HCU wrapper for the official VideoPhy-2 Nano SFT recipe.
+ # Keep model/training parameters in the official TOML; this file only supplies
+-# HCU topology and local data/checkpoint paths.
++# HCU topology and local data/checkpoint paths. Script-level defaults can be
++# overridden with environment variables; recipe overrides can be passed as
++# positional arguments after the script name.
+ 
+ set -euo pipefail
+ 
+-TOML_FILE="examples/toml/sft_config/videophy2_sft_nano.toml"
++: "${TOML_FILE:=examples/toml/sft_config/videophy2_sft_nano.toml}"
++: "${VIDEOPHYSICS_ROOT:=/data/Cosmos/datasets/videophysics_iter2_repro}"
++: "${VLM_MODEL_NAME:=/public/opendas/DL_DATA/llm-models/qwen3/Qwen3-VL-8B-Instruct}"
++: "${VLM_SAFETENSORS_PATH:=/data/Cosmos/checkpoints/Cosmos3-Nano-VLM}"
++: "${RUN_NAME:=reasoner_videophy2_nano_hcu_perf_8card}"
++: "${OUTPUT_ROOT:=/data/Cosmos/cosmos/outputs/hcu_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${HIP_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
++: "${MASTER_PORT:=29711}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++: "${PERF_RECORD_ENABLED:=true}"
++: "${PERF_WARMUP_ITERS:=10}"
+ 
+-VIDEOPHYSICS_ROOT="/data/Cosmos/datasets/videophysics_iter2_repro"
+-VLM_MODEL_NAME="/public/opendas/DL_DATA/llm-models/qwen3/Qwen3-VL-8B-Instruct"
+-VLM_SAFETENSORS_PATH="/data/Cosmos/checkpoints/Cosmos3-Nano-VLM"
+-RUN_NAME="reasoner_videophy2_nano_hcu_perf_4card"
+-OUTPUT_ROOT="/data/Cosmos/cosmos/outputs/hcu_training"
+-LOG_FILENAME="${RUN_NAME}.log"
+-HIP_VISIBLE_DEVICES="4,5,6,7"
+-NPROC_PER_NODE=4
+-MASTER_PORT=29711
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list without empty entries: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
+ 
+-export COSMOS_TRAINING=true
+-export HF_HUB_OFFLINE=1
++export COSMOS_TRAINING="${COSMOS_TRAINING:-true}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+ export HIP_VISIBLE_DEVICES
+-export OMP_NUM_THREADS=1
+-export PYTHONUNBUFFERED=1
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+ export VIDEOPHYSICS_ROOT
++export PERF_RECORD_ENABLED PERF_WARMUP_ITERS
++PERF_PLATFORM="hcu"
++PERF_VISIBLE_DEVICES="$HIP_VISIBLE_DEVICES"
+ 
+ EXTRA_DATASET_CHECK='[[ -f "$VIDEOPHYSICS_ROOT/videophy2_train/meta.json" ]] || { echo "ERROR: missing $VIDEOPHYSICS_ROOT/videophy2_train/meta.json" >&2; exit 1; }'
+ 
+@@ -33,12 +48,18 @@ TAIL_OVERRIDES=(
+     "model.config.policy.backbone.safetensors_path=${VLM_SAFETENSORS_PATH}"
+     "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
+     "trainer.seed=42"
+-    "trainer.max_iter=70"
+-    "checkpoint.save_iter=1000"
++    "trainer.max_iter=${MAX_ITER}"
++    # Keep the cosine schedule valid when the HCU performance run extends the
++    # official 50-iteration recipe. Otherwise scheduler step 51 has no cycle.
++    "scheduler.cycle_lengths=[${MAX_ITER}]"
++    "trainer.callbacks.log_tensor_shape.num_log=-1"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+ )
+ TAIL_OVERRIDES+=("$@")
+ 
+ echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> Processes per node: ${NPROC_PER_NODE}"
++echo ">>> Max iterations / scheduler cycle: ${MAX_ITER}"
+ echo ">>> HCU FSDP communication ordering: framework"
+ 
+ source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_reasoner_videophy2_nano_nvidia_local.sh b/examples/launch_sft_reasoner_videophy2_nano_nvidia_local.sh
+new file mode 100644
+index 0000000..f8b0077
+--- /dev/null
++++ b/examples/launch_sft_reasoner_videophy2_nano_nvidia_local.sh
+@@ -0,0 +1,35 @@
++#!/usr/bin/env bash
++# NVIDIA/H20 local-asset mirror of the HCU VideoPhy-2 Nano performance run.
++
++set -euo pipefail
++
++: "${TOML_FILE:=examples/toml/sft_config/videophy2_sft_nano.toml}"
++: "${VIDEOPHYSICS_ROOT:=/data/datasets/videophysics_iter2_repro}"
++: "${VLM_MODEL_NAME:=/public/opendas/DL_DATA/llm-models/Qwen3-VL-8B-Instruct}"
++: "${VLM_SAFETENSORS_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-VLM}"
++: "${RUN_NAME:=reasoner_videophy2_nano_nvidia_h20_perf_8card}"
++: "${OUTPUT_ROOT:=/data/outputs/nvidia_training}"
++: "${LOG_FILENAME:=${RUN_NAME}.log}"
++: "${MASTER_PORT:=30711}"
++: "${MAX_ITER:=70}"
++: "${CHECKPOINT_SAVE_ITER:=1000}"
++
++export VIDEOPHYSICS_ROOT
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_nvidia_local_common.sh"
++
++EXTRA_DATASET_CHECK='[[ -f "$VIDEOPHYSICS_ROOT/videophy2_train/meta.json" ]] || { echo "ERROR: missing $VIDEOPHYSICS_ROOT/videophy2_train/meta.json" >&2; exit 1; }'
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.policy.backbone.model_name=${VLM_MODEL_NAME}"
++    "model.config.policy.backbone.safetensors_path=${VLM_SAFETENSORS_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "trainer.seed=42"
++    "trainer.max_iter=${MAX_ITER}"
++    "scheduler.cycle_lengths=[${MAX_ITER}]"
++    "trainer.callbacks.log_tensor_shape.num_log=-1"
++    "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
++)
++TAIL_OVERRIDES+=("$@")
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_vision_nano_local.sh b/examples/launch_sft_vision_nano_local.sh
+new file mode 100644
+index 0000000..f15ebb2
+--- /dev/null
++++ b/examples/launch_sft_vision_nano_local.sh
+@@ -0,0 +1,5 @@
++#!/usr/bin/env bash
++# Backward-compatible alias for the aligned NVIDIA-local performance launcher.
++
++set -euo pipefail
++exec bash "$(dirname "${BASH_SOURCE[0]}")/launch_sft_generator_vision_nano_nvidia_local.sh" "$@"
+diff --git a/examples/summarize_sft_perf.py b/examples/summarize_sft_perf.py
+new file mode 100644
+index 0000000..127417a
+--- /dev/null
++++ b/examples/summarize_sft_perf.py
+@@ -0,0 +1,237 @@
++#!/usr/bin/env python3
++"""Extract a compact, machine-readable SFT performance summary from a log."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import math
++import re
++import statistics
++from collections import defaultdict
++from datetime import datetime, timezone
++from pathlib import Path
++
++
++INITIAL_ITER_RE = re.compile(r"Iteration\s+(\d+)(?:/\d+)?.*?Time:\s*([0-9.]+)s")
++STEADY_ITER_RE = re.compile(r"(?:^|\])\s*(\d+)\s*:\s*iter_speed\s+([0-9.]+)\s+seconds per iteration")
++LOSS_RE = re.compile(r"train/loss_avg:\s*([-+0-9.eE]+)\s*\(iteration\s+(\d+)\)")
++ACTION_LOSS_RE = re.compile(r"Iteration\s+(\d+):.*?Loss:\s*([-+0-9.eE]+)")
++GRAD_RE = re.compile(r"clip_grad_norm/(?:[^:\s]+/)*global:\s*([-+0-9.eE]+)\s*\(iteration\s+(\d+)\)")
++TOKENS_RE = re.compile(
++    r"(\d+)\s*:\s*tokens_per_sec_per_gpu\s+([0-9.]+)\s*\|\s*"
++    r"useful_tokens_per_sec_per_gpu\s+([0-9.]+)\s*\|\s*"
++    r"useful_supervised_tokens_per_sec_per_gpu\s+([0-9.]+)\s*\|\s*"
++    r"tokens_per_step\s+([0-9.]+)\s*\|\s*samples_per_step\s+([0-9.]+)"
++)
++PEAK_MEM_RE = re.compile(r"peak_mem_gb\s+([0-9.]+)")
++RANK_RE = re.compile(r"\[RANK\s+(\d+)\]")
++
++
++def _stats(values: list[float]) -> dict[str, float | int] | None:
++    values = [value for value in values if math.isfinite(value)]
++    if not values:
++        return None
++    return {
++        "count": len(values),
++        "mean": statistics.fmean(values),
++        "median": statistics.median(values),
++        "min": min(values),
++        "max": max(values),
++    }
++
++
++def _rank0_or_median(values: list[tuple[int | None, float]]) -> float:
++    rank0 = [value for rank, value in values if rank == 0]
++    return rank0[-1] if rank0 else statistics.median(value for _, value in values)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--log", required=True, type=Path)
++    parser.add_argument("--output", required=True, type=Path)
++    parser.add_argument("--platform", required=True)
++    parser.add_argument("--run-name", required=True)
++    parser.add_argument("--devices", required=True)
++    parser.add_argument("--nproc", required=True, type=int)
++    parser.add_argument("--warmup-iters", default=10, type=int)
++    parser.add_argument("--start-epoch", required=True, type=int)
++    parser.add_argument("--end-epoch", required=True, type=int)
++    parser.add_argument("--exit-code", required=True, type=int)
++    parser.add_argument("--toml", required=True)
++    parser.add_argument("--max-iter", type=int)
++    parser.add_argument("--git-commit", default="unknown")
++    parser.add_argument("--override", action="append", default=[])
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    text = args.log.read_text(encoding="utf-8", errors="replace")
++    iteration_values: dict[int, list[tuple[int | None, float]]] = defaultdict(list)
++    steady_values: dict[int, list[tuple[int | None, float]]] = defaultdict(list)
++    losses: dict[int, list[float]] = defaultdict(list)
++    grad_norms: dict[int, list[tuple[int | None, float]]] = defaultdict(list)
++    throughput: dict[int, dict[str, float]] = {}
++
++    for line in text.splitlines():
++        rank_match = RANK_RE.search(line)
++        rank = int(rank_match.group(1)) if rank_match else None
++        if match := INITIAL_ITER_RE.search(line):
++            iteration_values[int(match.group(1))].append((rank, float(match.group(2))))
++        if match := STEADY_ITER_RE.search(line):
++            steady_values[int(match.group(1))].append((rank, float(match.group(2))))
++        if match := LOSS_RE.search(line):
++            losses[int(match.group(2))].append(float(match.group(1)))
++        elif match := ACTION_LOSS_RE.search(line):
++            losses[int(match.group(1))].append(float(match.group(2)))
++        if match := GRAD_RE.search(line):
++            grad_norms[int(match.group(2))].append((rank, float(match.group(1))))
++        if match := TOKENS_RE.search(line):
++            iteration = int(match.group(1))
++            values = {
++                "tokens_per_sec_per_gpu": float(match.group(2)),
++                "useful_tokens_per_sec_per_gpu": float(match.group(3)),
++                "useful_supervised_tokens_per_sec_per_gpu": float(match.group(4)),
++                "tokens_per_step": float(match.group(5)),
++                "samples_per_step": float(match.group(6)),
++            }
++            if peak_match := PEAK_MEM_RE.search(line):
++                values["peak_mem_gb"] = float(peak_match.group(1))
++            throughput[iteration] = values
++
++    # The callback's steady-window metric is preferable when available. Initial
++    # hit-counter timings remain useful for short runs and warm-up inspection.
++    merged_times = {
++        iteration: _rank0_or_median(values)
++        for iteration, values in iteration_values.items()
++    }
++    merged_times.update(
++        {iteration: _rank0_or_median(values) for iteration, values in steady_values.items()}
++    )
++    stable_times = [
++        value for iteration, value in sorted(merged_times.items()) if iteration > args.warmup_iters
++    ]
++    all_times = [value for _, value in sorted(merged_times.items())]
++    stable_throughput = [
++        values
++        for iteration, values in sorted(throughput.items())
++        if iteration > args.warmup_iters
++    ]
++
++    throughput_summary = {}
++    for key in (
++        "tokens_per_sec_per_gpu",
++        "useful_tokens_per_sec_per_gpu",
++        "useful_supervised_tokens_per_sec_per_gpu",
++        "tokens_per_step",
++        "samples_per_step",
++        "peak_mem_gb",
++    ):
++        if result := _stats([row[key] for row in stable_throughput if key in row]):
++            throughput_summary[key] = result
++    useful = throughput_summary.get("useful_tokens_per_sec_per_gpu")
++    if useful:
++        throughput_summary["useful_tokens_per_sec_global_estimate"] = {
++            key: value * args.nproc if key != "count" else value
++            for key, value in useful.items()
++        }
++
++    loss_series = [
++        {
++            "iteration": iteration,
++            "mean": statistics.fmean(values),
++            "min": min(values),
++            "max": max(values),
++        }
++        for iteration, values in sorted(losses.items())
++    ]
++    grad_series = [
++        {"iteration": iteration, "global": _rank0_or_median(values)}
++        for iteration, values in sorted(grad_norms.items())
++    ]
++    steady_time_stats = _stats(stable_times)
++    iteration_throughput = None
++    if steady_time_stats and steady_time_stats["mean"] > 0:
++        iteration_throughput = 1.0 / steady_time_stats["mean"]
++    samples_per_step = throughput_summary.get("samples_per_step")
++    if samples_per_step and steady_time_stats and steady_time_stats["mean"] > 0:
++        throughput_summary["samples_per_sec_global_estimate"] = (
++            samples_per_step["mean"] * args.nproc / steady_time_stats["mean"]
++        )
++
++    summary = {
++        "schema_version": 1,
++        "run": {
++            "name": args.run_name,
++            "platform": args.platform,
++            "devices": args.devices,
++            "nproc_per_node": args.nproc,
++            "toml": args.toml,
++            "max_iter": args.max_iter,
++            "warmup_iters_excluded": args.warmup_iters,
++            "git_commit": args.git_commit,
++            "overrides": args.override,
++            "start_time": datetime.fromtimestamp(args.start_epoch, timezone.utc).isoformat(),
++            "end_time": datetime.fromtimestamp(args.end_epoch, timezone.utc).isoformat(),
++            "wall_time_sec": args.end_epoch - args.start_epoch,
++            "exit_code": args.exit_code,
++            "log_file": str(args.log),
++        },
++        "iteration_time_sec": {
++            "all": _stats(all_times),
++            "steady": steady_time_stats,
++            "steady_iterations_per_sec": iteration_throughput,
++            "series": [
++                {"iteration": iteration, "seconds": seconds}
++                for iteration, seconds in sorted(merged_times.items())
++            ],
++        },
++        "throughput": throughput_summary,
++        "loss": {
++            "finite": all(math.isfinite(row["mean"]) for row in loss_series),
++            "series": loss_series,
++        },
++        "grad_norm": {
++            "finite": all(math.isfinite(row["global"]) for row in grad_series),
++            "series": grad_series,
++        },
++    }
++
++    args.output.parent.mkdir(parents=True, exist_ok=True)
++    args.output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++    steady = summary["iteration_time_sec"]["steady"]
++    md_path = args.output.with_suffix(".md")
++    lines = [
++        f"# {args.run_name}",
++        "",
++        f"- Platform: `{args.platform}`",
++        f"- Devices / processes: `{args.devices}` / `{args.nproc}`",
++        f"- Git commit: `{args.git_commit}`",
++        f"- Exit code: `{args.exit_code}`",
++        f"- Wall time: `{args.end_epoch - args.start_epoch}s`",
++        f"- Warm-up iterations excluded: `{args.warmup_iters}`",
++    ]
++    if steady:
++        lines.extend(
++            [
++                f"- Steady iterations: `{steady['count']}`",
++                f"- Steady iteration time mean/median: `{steady['mean']:.4f}s` / `{steady['median']:.4f}s`",
++                f"- Steady iteration time min/max: `{steady['min']:.4f}s` / `{steady['max']:.4f}s`",
++                f"- Steady iteration throughput: `{1.0 / steady['mean']:.6f} iteration/s`",
++            ]
++        )
++    else:
++        lines.append("- Steady iteration time: unavailable (run is shorter than warm-up window or log format did not match)")
++    if useful:
++        lines.append(
++            f"- Useful tokens/s/GPU mean: `{useful['mean']:.2f}`; global estimate: `{useful['mean'] * args.nproc:.2f}`"
++        )
++    lines.extend(["", f"Raw log: `{args.log}`", f"JSON: `{args.output}`", ""])
++    md_path.write_text("\n".join(lines), encoding="utf-8")
++    print(f">>> Performance summary: {args.output}")
++    print(f">>> Performance markdown: {md_path}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/examples/toml/sft_config/action_policy_droid_nano.toml b/examples/toml/sft_config/action_policy_droid_nano.toml
+new file mode 100644
+index 0000000..7542553
+--- /dev/null
++++ b/examples/toml/sft_config/action_policy_droid_nano.toml
+@@ -0,0 +1,66 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: OpenMDW-1.1
++
++# ============================================================================
++# DROID action-policy SFT — run config for the `action_policy_droid_nano`
++# experiment. Reproduces the Cosmos3-Nano-Policy-DROID reference run:
++# HSDP 32x8, global batch 8192, lr 2e-4, loss_scale 10, 10000 iters. The
++# remaining recipe knobs (grad_clip, count-based batch, action-head
++# skip-on-load, dataset knobs) live in the registered experiment; this file
++# pins the run-level scalars that define the reference reproduction.
++#
++# Env required:
++#   DROID_ROOT=/path/to/droid_lerobot_640x360/success
++#   BASE_CHECKPOINT_PATH=<Cosmos3-Nano DCP dir>
++#   WAN_VAE_PATH=<Wan2.2_VAE.pth>
++#   IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root   # persist checkpoints
++# ============================================================================
++
++[job]
++task         = "vfm"
++experiment   = "action_policy_droid_nano"
++project      = "cosmos3_action"
++group        = "action_sft"
++name         = "action_policy_droid_nano"
++wandb_mode   = "online"
++
++[model]
++precision = "bfloat16"
++
++[model.parallelism]
++data_parallel_shard_degree     = 8
++data_parallel_replicate_degree = 32
++
++[model.activation_checkpointing]
++mode           = "full"
++save_ops_regex = ["fmha"]
++
++[model.tokenizer]
++vae_path = "${oc.env:WAN_VAE_PATH}"
++
++[optimizer]
++lr = 2.0e-04
++
++[scheduler]
++cycle_lengths = [100000]
++
++[dataloader_train]
++max_samples_per_batch = 32
++
++[trainer]
++max_iter        = 10000
++logging_iter    = 50
++grad_accum_iter = 1
++
++[trainer.callbacks.compile_tokenizer]
++enabled            = true
++warmup_resolutions = ["480"]
++
++[checkpoint]
++load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
++save_iter = 1000
++
++# The 256-rank HSDP 32x8 shape (global batch 8192) is the GB200 reference. To fit
++# fewer GPUs while keeping global batch 8192, lower data_parallel_replicate_degree
++# and raise grad_accum_iter at launch — e.g. one 8-GPU node:
++#   --opts model.parallelism.data_parallel_replicate_degree=1 trainer.grad_accum_iter=32
+diff --git a/examples/toml/sft_config/action_policy_libero_10_nano.toml b/examples/toml/sft_config/action_policy_libero_10_nano.toml
+new file mode 100644
+index 0000000..2952e22
+--- /dev/null
++++ b/examples/toml/sft_config/action_policy_libero_10_nano.toml
+@@ -0,0 +1,46 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: OpenMDW-1.1
++
++# LIBERO-10 action-policy SFT run config for the `action_policy_libero_nano`
++# experiment. Train on libero_10 alone (HSDP 2x8, global batch 2048).
++# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
++# See docs/action_policy_libero_sft.md.
++
++[job]
++task         = "vfm"
++experiment   = "action_policy_libero_nano"
++project      = "cosmos3_action_libero"
++group        = "action_sft"
++name         = "action_policy_libero_10_nano"
++wandb_mode   = "online"
++
++[model]
++precision = "bfloat16"
++max_num_tokens_after_packing = 74000
++
++[model.parallelism]
++data_parallel_shard_degree     = 8
++data_parallel_replicate_degree = 2
++
++[model.activation_checkpointing]
++mode           = "selective"
++save_ops_regex = ["fmha"]
++
++[model.tokenizer]
++vae_path = "${oc.env:WAN_VAE_PATH}"
++
++[optimizer]
++lr = 5.0e-05
++
++[scheduler]
++cycle_lengths = [16000]
++warm_up_steps = [500]
++
++[trainer]
++max_iter        = 2000
++logging_iter    = 50
++grad_accum_iter = 1
++
++[checkpoint]
++load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
++save_iter = 500
+diff --git a/examples/toml/sft_config/action_policy_libero_all_nano.toml b/examples/toml/sft_config/action_policy_libero_all_nano.toml
+new file mode 100644
+index 0000000..7ab0208
+--- /dev/null
++++ b/examples/toml/sft_config/action_policy_libero_all_nano.toml
+@@ -0,0 +1,49 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: OpenMDW-1.1
++
++# LIBERO-all (4-suite) action-policy SFT run config for the
++# `action_policy_libero_all_nano` experiment. Trains on all 4 LIBERO suites
++# (equal mix); LIBERO_ROOT is the LIBERO_LeRobot_v3 PARENT dir. The 4-suite mix
++# is coverage-limited — it needs ~4500 iters to reach ~95% on libero_10 (vs the
++# libero_10-only recipe, which peaks by ~1500) — so max_iter is longer here.
++# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
++# See docs/action_policy_libero_sft.md.
++
++[job]
++task         = "vfm"
++experiment   = "action_policy_libero_all_nano"
++project      = "cosmos3_action_libero"
++group        = "action_sft"
++name         = "action_policy_libero_all_nano"
++wandb_mode   = "online"
++
++[model]
++precision = "bfloat16"
++max_num_tokens_after_packing = 74000
++
++[model.parallelism]
++data_parallel_shard_degree     = 8
++data_parallel_replicate_degree = 2
++
++[model.activation_checkpointing]
++mode           = "selective"
++save_ops_regex = ["fmha"]
++
++[model.tokenizer]
++vae_path = "${oc.env:WAN_VAE_PATH}"
++
++[optimizer]
++lr = 5.0e-05
++
++[scheduler]
++cycle_lengths = [16000]
++warm_up_steps = [500]
++
++[trainer]
++max_iter        = 5000
++logging_iter    = 50
++grad_accum_iter = 1
++
++[checkpoint]
++load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
++save_iter = 500

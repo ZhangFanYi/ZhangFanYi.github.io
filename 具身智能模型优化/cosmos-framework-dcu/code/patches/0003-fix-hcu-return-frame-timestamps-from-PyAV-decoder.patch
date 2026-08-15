@@ -1,0 +1,36 @@
+From bb0cbfd3061273c057ce83c17e26d63d5352c6cd Mon Sep 17 00:00:00 2001
+From: iMountTai <2506700016@qq.com>
+Date: Fri, 31 Jul 2026 11:28:16 +0800
+Subject: [PATCH 3/6] fix(hcu): return frame timestamps from PyAV decoder
+
+---
+ cosmos_framework/scripts/train.py | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/cosmos_framework/scripts/train.py b/cosmos_framework/scripts/train.py
+index d6514ea..57664e0 100644
+--- a/cosmos_framework/scripts/train.py
++++ b/cosmos_framework/scripts/train.py
+@@ -85,6 +85,7 @@ def _install_torchcodec_pyav_fallback() -> None:
+             if not frames:
+                 raise ValueError("video has zero frames")
+             self._frames = torch.stack(frames)
++            self._fps = fps
+             _, height, width = self._frames.shape[1:]
+             self.metadata = types.SimpleNamespace(
+                 num_frames=len(frames),
+@@ -98,7 +99,13 @@ def _install_torchcodec_pyav_fallback() -> None:
+                 indices = kwargs["indices"]
+             if isinstance(indices, torch.Tensor):
+                 indices = indices.cpu().tolist()
+-            return types.SimpleNamespace(data=self._frames[indices])
++            if isinstance(indices, int):
++                indices = [indices]
++            index_tensor = torch.as_tensor(indices, dtype=torch.float64)
++            return types.SimpleNamespace(
++                data=self._frames[indices],
++                pts_seconds=index_tensor / self._fps,
++            )
+ 
+     class _AudioDecoder:
+         def __init__(self, *args, **kwargs) -> None:

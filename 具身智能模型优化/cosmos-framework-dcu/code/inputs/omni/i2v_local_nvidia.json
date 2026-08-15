@@ -1,0 +1,6 @@
+{
+  "model_mode": "image2video",
+  "name": "i2v_local_nvidia",
+  "prompt": "A silver car drives smoothly along a winding coastal road. The camera follows the car as sunlight glints on the body, with green hills and blue water in the background.",
+  "vision_path": "/data/cosmos/cookbooks/cosmos3/generator/audiovisual/assets/images/image2video/car_driving.jpg"
+}

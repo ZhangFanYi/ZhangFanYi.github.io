@@ -27,8 +27,7 @@
 | 12 | [LeRobot-ACT-DCU](./具身智能模型优化/lerobot-act-dcu/) | ✅ 性能提升30% |
 | 13 | [LingBot-VA-DCU](./具身智能模型优化/lingbot-va-dcu/) | ✅ 性能提升28% |
 | 14 | [LingBot-VLA-DCU](./具身智能模型优化/lingbot-vla-dcu/) | ✅ 性能提升52% |
-| 15 | [Cosmos3-Nano-DCU](./具身智能模型优化/lingbot-vla-dcu/) | ✅ 性能提升23% |
-
+| 15 | [Cosmos3-Nano-DCU 适配优化(世界模型/具身策略微调)](./具身智能模型优化/cosmos-framework-dcu/) | ✅ 性能提升22% |
 
 ---
 

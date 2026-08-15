@@ -1,0 +1,128 @@
+From 9bfd60b6b466424a26e514b486ec872f44fa1c76 Mon Sep 17 00:00:00 2001
+From: iMountTai <2506700016@qq.com>
+Date: Fri, 31 Jul 2026 16:21:02 +0800
+Subject: [PATCH 5/6] enable offline W&B logging for vision nano
+
+---
+ cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py | 2 +-
+ .../launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh    | 1 +
+ ...h_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh | 1 +
+ examples/launch_sft_generator_vision_nano_hcu.sh                | 1 +
+ examples/launch_sft_generator_vision_nano_nvidia_local.sh       | 1 +
+ examples/launch_sft_vision_nano.sh                              | 2 ++
+ examples/launch_sft_vision_nano_cosmosdataloader.sh             | 2 +-
+ examples/toml/sft_config/vision_sft_nano.toml                   | 2 +-
+ .../toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml    | 2 +-
+ 9 files changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py b/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py
+index 6e04bb2..935b586 100644
+--- a/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py
++++ b/cosmos_framework/configs/base/experiment/sft/vision_sft_nano.py
+@@ -89,7 +89,7 @@ vision_sft_nano = LazyDict(
+             project="cosmos3",
+             group="sft",
+             name="vision_sft_nano",
+-            wandb_mode="disabled",
++            wandb_mode="offline",
+         ),
+         model=dict(
+             config=deepcopy(VISION_NANO_MODEL_CONFIG),
+diff --git a/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh b/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+index 30e3a24..bc8a352 100644
+--- a/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
++++ b/examples/launch_sft_generator_vision_nano_cosmosdataloader_hcu.sh
+@@ -43,6 +43,7 @@ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: n
+ 
+ TAIL_OVERRIDES=(
+     "job.name=${RUN_NAME}"
++    "job.wandb_mode=offline"
+     "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+diff --git a/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh b/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+index cad0f03..c801b0f 100644
+--- a/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
++++ b/examples/launch_sft_generator_vision_nano_cosmosdataloader_nvidia_local.sh
+@@ -20,6 +20,7 @@ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] ||
+ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
+ TAIL_OVERRIDES=(
+     "job.name=${RUN_NAME}"
++    "job.wandb_mode=offline"
+     "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+diff --git a/examples/launch_sft_generator_vision_nano_hcu.sh b/examples/launch_sft_generator_vision_nano_hcu.sh
+index 2189c95..ec72c5e 100755
+--- a/examples/launch_sft_generator_vision_nano_hcu.sh
++++ b/examples/launch_sft_generator_vision_nano_hcu.sh
+@@ -45,6 +45,7 @@ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: n
+ 
+ TAIL_OVERRIDES=(
+     "job.name=${RUN_NAME}"
++    "job.wandb_mode=offline"
+     "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+diff --git a/examples/launch_sft_generator_vision_nano_nvidia_local.sh b/examples/launch_sft_generator_vision_nano_nvidia_local.sh
+index aab8cc8..dbc4616 100644
+--- a/examples/launch_sft_generator_vision_nano_nvidia_local.sh
++++ b/examples/launch_sft_generator_vision_nano_nvidia_local.sh
+@@ -20,6 +20,7 @@ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] ||
+ compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
+ TAIL_OVERRIDES=(
+     "job.name=${RUN_NAME}"
++    "job.wandb_mode=offline"
+     "model.config.vlm_config.tokenizer.pretrained_model_name=${VLM_TOKENIZER_PATH}"
+     "trainer.max_iter=${MAX_ITER}"
+     "checkpoint.save_iter=${CHECKPOINT_SAVE_ITER}"
+diff --git a/examples/launch_sft_vision_nano.sh b/examples/launch_sft_vision_nano.sh
+index a6f725f..dcd8401 100755
+--- a/examples/launch_sft_vision_nano.sh
++++ b/examples/launch_sft_vision_nano.sh
+@@ -24,4 +24,6 @@ TOML_FILE="examples/toml/sft_config/vision_sft_nano.toml"
+ 
+ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }'
+ 
++TAIL_OVERRIDES=("job.wandb_mode=offline")
++
+ source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_vision_nano_cosmosdataloader.sh b/examples/launch_sft_vision_nano_cosmosdataloader.sh
+index a6f5797..e5708aa 100755
+--- a/examples/launch_sft_vision_nano_cosmosdataloader.sh
++++ b/examples/launch_sft_vision_nano_cosmosdataloader.sh
+@@ -22,7 +22,7 @@ EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] ||
+ 
+ TAIL_OVERRIDES=(
+     "trainer.logging_iter=1" "trainer.max_iter=500"
+-    "job.project=cosmos_oss_alignment" "job.wandb_mode=online" "job.name=${RUN_NAME}"
++    "job.project=cosmos_oss_alignment" "job.wandb_mode=offline" "job.name=${RUN_NAME}"
+ )
+ 
+ source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/toml/sft_config/vision_sft_nano.toml b/examples/toml/sft_config/vision_sft_nano.toml
+index aac4567..a3ea9af 100644
+--- a/examples/toml/sft_config/vision_sft_nano.toml
++++ b/examples/toml/sft_config/vision_sft_nano.toml
+@@ -11,7 +11,7 @@ experiment   = "vision_sft_nano"
+ project      = "cosmos3"
+ group        = "sft"
+ name         = "vision_sft_nano"
+-wandb_mode   = "disabled"
++wandb_mode   = "offline"
+ 
+ [model]
+ max_num_tokens_after_packing = 45056
+diff --git a/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml b/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml
+index 1e7aea5..2ec2fa4 100644
+--- a/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml
++++ b/examples/toml/sft_config/vision_sft_nano_mapstyle_dataloader.toml
+@@ -19,7 +19,7 @@ experiment   = "vision_sft_nano_mapstyle_dataloader"
+ project      = "cosmos3"
+ group        = "sft"
+ name         = "vision_sft_nano_mapstyle_dataloader"
+-wandb_mode   = "disabled"
++wandb_mode   = "offline"
+ 
+ [model]
+ max_num_tokens_after_packing = 45056

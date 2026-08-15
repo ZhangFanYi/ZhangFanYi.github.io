@@ -1,0 +1,1307 @@
+From fbe4ea7c0a5ffd8a3550adc5ca5cdfe25cbdca32 Mon Sep 17 00:00:00 2001
+From: yaoxin <yaoxin@sugon.com>
+Date: Wed, 29 Jul 2026 17:44:06 +0800
+Subject: [PATCH 1/6] feat(hcu): preserve Cosmos3 training adaptations
+
+---
+ cosmos_framework/callbacks/device_monitor.py  |  10 +-
+ cosmos_framework/callbacks/grad_clip.py       |   3 +-
+ .../configs/base/defaults/reasoner.py         |  15 +-
+ .../experiment/videophy2_dataflow_roles.py    |  71 +++++--
+ .../reasoner/experiment/videophy2_sft_nano.py |  71 +++++--
+ .../configs/toml_config/sft_config.py         |   5 +-
+ .../generator/sequence_packing/runtime.py     |  26 +++
+ cosmos_framework/inference/common/config.py   |   5 +-
+ cosmos_framework/inference/sound.py           |   4 +
+ cosmos_framework/model/attention/backends.py  |  22 +-
+ .../model/attention/flash2/__init__.py        |   2 +-
+ .../model/attention/flash2/checks.py          |   7 -
+ .../model/attention/flash2/functions.py       | 196 +++++++++++++++++-
+ .../model/attention/utils/__init__.py         |  26 ++-
+ .../generator/algorithm/loss/cross_entropy.py |   3 +-
+ .../model/generator/mot/attention.py          |  31 +--
+ .../model/generator/parallelize_vlm.py        |  17 +-
+ cosmos_framework/model/generator/vlm_model.py |   3 +-
+ cosmos_framework/scripts/train.py             |  77 +++++++
+ cosmos_framework/utils/distributed.py         |   6 +-
+ cosmos_framework/utils/fsdp_ordered_comm.py   | 148 +++++++++++++
+ .../utils/generator/hf_attention_cosmos.py    |   8 +-
+ examples/README.md                            |   5 +
+ .../launch_sft_generator_vision_nano_hcu.sh   |  43 ++++
+ .../launch_sft_reasoner_videophy2_nano_hcu.sh |  44 ++++
+ 25 files changed, 759 insertions(+), 89 deletions(-)
+ create mode 100644 cosmos_framework/utils/fsdp_ordered_comm.py
+ create mode 100755 examples/launch_sft_generator_vision_nano_hcu.sh
+ create mode 100755 examples/launch_sft_reasoner_videophy2_nano_hcu.sh
+
+diff --git a/cosmos_framework/callbacks/device_monitor.py b/cosmos_framework/callbacks/device_monitor.py
+index 65fd1d4..afe5f16 100644
+--- a/cosmos_framework/callbacks/device_monitor.py
++++ b/cosmos_framework/callbacks/device_monitor.py
+@@ -95,6 +95,7 @@ class DeviceMonitor(EveryN):
+         torch.cuda.reset_peak_memory_stats()
+         self.world_size = distributed.get_world_size()
+         self.rank = distributed.get_rank()
++        self._enabled = True
+         config_job = self.config.job
+         self.local_dir = f"{config_job.path_local}/{self.name}"
+         if self.rank == 0:
+@@ -102,7 +103,12 @@ class DeviceMonitor(EveryN):
+             log.info(f"{self.name} callback: local_dir: {self.local_dir}")
+ 
+         local_rank = int(os.getenv("LOCAL_RANK", 0))
+-        self.handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
++        try:
++            self.handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
++        except Exception as exc:
++            self._enabled = False
++            if self.rank == 0:
++                log.warning(f"{self.name} callback disabled: NVML device handle unavailable: {exc}")
+ 
+     def every_n_impl(
+         self,
+@@ -113,6 +119,8 @@ class DeviceMonitor(EveryN):
+         loss: torch.Tensor,
+         iteration: int,
+     ) -> None:
++        if not getattr(self, "_enabled", True):
++            return
+         cur_process = psutil.Process(os.getpid())
+         # cur_process.children(recursive=True) can crash if the dataloader is constantly creating and destroying processes (e.g. calling FFmpeg).
+         try:
+diff --git a/cosmos_framework/callbacks/grad_clip.py b/cosmos_framework/callbacks/grad_clip.py
+index c6a8f16..be20c8d 100644
+--- a/cosmos_framework/callbacks/grad_clip.py
++++ b/cosmos_framework/callbacks/grad_clip.py
+@@ -10,6 +10,7 @@ from torch.distributed.tensor import DTensor
+ 
+ from cosmos_framework.utils import log
+ from cosmos_framework.utils.callback import Callback
++from cosmos_framework.utils.fsdp_ordered_comm import materialize_dtensor_norm
+ 
+ 
+ def _fused_nan_to_num(grads: list[torch.Tensor]) -> None:
+@@ -142,7 +143,7 @@ def _clip_grad(
+             # If only using PP, mesh_norm will be a local tensor.
+ 
+             # Remove FT replicate dimension if it exists.
+-            mesh_norm = mesh_norm.full_tensor()
++            mesh_norm = materialize_dtensor_norm(mesh_norm)
+         # Expose the (rank-replicated) per-mesh scalar for diagnostic logging.
+         per_mesh_norms[mesh] = mesh_norm
+ 
+diff --git a/cosmos_framework/configs/base/defaults/reasoner.py b/cosmos_framework/configs/base/defaults/reasoner.py
+index bee81b6..b129de0 100644
+--- a/cosmos_framework/configs/base/defaults/reasoner.py
++++ b/cosmos_framework/configs/base/defaults/reasoner.py
+@@ -4,6 +4,7 @@
+ # Configs for VLM / LLM models
+ 
+ import os
++from pathlib import Path
+ from typing import Any
+ 
+ import attrs
+@@ -98,7 +99,19 @@ def download_tokenizer_files(model_name: str, config_variant: str) -> str:
+     return destination_dir
+ 
+ 
+-def create_qwen2_tokenizer_with_download(pretrained_model_name: str, config_variant: str):
++def create_qwen2_tokenizer_with_download(
++    pretrained_model_name: str,
++    config_variant: str,
++    local_processor_dir: str = "",
++):
++    if local_processor_dir:
++        local_processor = Path(local_processor_dir)
++        if not local_processor.is_dir():
++            raise FileNotFoundError(f"local_processor_dir not found: {local_processor}")
++        from cosmos_framework.data.generator.processors.qwen3vl_processor import Qwen3VLProcessor
++
++        return Qwen3VLProcessor(local_processor.as_posix())
++
+     destination_dir = download_tokenizer_files(pretrained_model_name, config_variant)
+     return LLMTokenizerProcessor(Qwen2Tokenizer.from_pretrained(destination_dir))
+ 
+diff --git a/cosmos_framework/configs/base/reasoner/experiment/videophy2_dataflow_roles.py b/cosmos_framework/configs/base/reasoner/experiment/videophy2_dataflow_roles.py
+index 0d0a548..0fba853 100644
+--- a/cosmos_framework/configs/base/reasoner/experiment/videophy2_dataflow_roles.py
++++ b/cosmos_framework/configs/base/reasoner/experiment/videophy2_dataflow_roles.py
+@@ -16,29 +16,60 @@ _TARGET_VIDEO_FPS = 2.0
+ 
+ 
+ def _decode_video_to_pil_frames(video_bytes: bytes) -> tuple[list, float]:
+-    from torchcodec.decoders import VideoDecoder
++    """Decode ``video_bytes`` into PIL frames sampled at ~``_TARGET_VIDEO_FPS``.
++
++    Prefers torchcodec; falls back to ``torchvision.io.read_video`` when
++    libtorchcodec cannot be loaded (missing/incompatible ffmpeg build).
++    """
+     from PIL import Image
+     import numpy as np
+ 
+-    decoder = VideoDecoder(video_bytes)
+-    total_frames = decoder.metadata.num_frames or 0
+-    source_fps = float(decoder.metadata.average_fps or 0.0) or 30.0
+-
+-    if total_frames <= 0:
+-        raise ValueError("video has zero frames")
+-
+-    stride = max(1, int(round(source_fps / _TARGET_VIDEO_FPS)))
+-    indices = list(range(0, total_frames, stride))
+-    if len(indices) > _MAX_VIDEO_FRAMES:
+-        step = len(indices) / _MAX_VIDEO_FRAMES
+-        indices = [indices[int(i * step)] for i in range(_MAX_VIDEO_FRAMES)]
+-
+-    frames_tensor = decoder.get_frames_at(indices=indices).data
+-    frames_np = frames_tensor.permute(0, 2, 3, 1).contiguous().cpu().numpy().astype(np.uint8)
+-    frames = [Image.fromarray(f) for f in frames_np]
+-
+-    effective_fps = source_fps / stride if stride > 0 else source_fps
+-    return frames, float(effective_fps)
++    def _select_indices(total_frames, source_fps):
++        stride = max(1, int(round(source_fps / _TARGET_VIDEO_FPS)))
++        indices = list(range(0, total_frames, stride))
++        if len(indices) > _MAX_VIDEO_FRAMES:
++            step = len(indices) / _MAX_VIDEO_FRAMES
++            indices = [indices[int(i * step)] for i in range(_MAX_VIDEO_FRAMES)]
++        effective_fps = source_fps / stride if stride > 0 else source_fps
++        return indices, float(effective_fps)
++
++    try:
++        from torchcodec.decoders import VideoDecoder
++
++        decoder = VideoDecoder(video_bytes)
++        total_frames = decoder.metadata.num_frames or 0
++        source_fps = float(decoder.metadata.average_fps or 0.0) or 30.0
++        if total_frames <= 0:
++            raise ValueError("video has zero frames")
++
++        indices, effective_fps = _select_indices(total_frames, source_fps)
++        frames_tensor = decoder.get_frames_at(indices=indices).data
++        frames_np = frames_tensor.permute(0, 2, 3, 1).contiguous().cpu().numpy().astype(np.uint8)
++        frames = [Image.fromarray(f) for f in frames_np]
++        return frames, effective_fps
++    except (ImportError, RuntimeError, OSError):
++        # torchcodec unusable (libtorchcodec load failure); use torchvision.
++        import os
++        import tempfile
++        from torchvision.io import read_video
++
++        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
++            f.write(video_bytes)
++            path = f.name
++        try:
++            vframes, _, info = read_video(path, pts_unit="sec", output_format="THWC")
++        finally:
++            os.unlink(path)
++
++        total_frames = int(vframes.shape[0])
++        source_fps = float(info.get("video_fps") or 0.0) or 30.0
++        if total_frames <= 0:
++            raise ValueError("video has zero frames")
++
++        indices, effective_fps = _select_indices(total_frames, source_fps)
++        frames_np = vframes[indices].contiguous().cpu().numpy().astype(np.uint8)
++        frames = [Image.fromarray(f) for f in frames_np]
++        return frames, effective_fps
+ 
+ 
+ class VideoPhy2Processor(RawItemProcessor):
+diff --git a/cosmos_framework/configs/base/reasoner/experiment/videophy2_sft_nano.py b/cosmos_framework/configs/base/reasoner/experiment/videophy2_sft_nano.py
+index 1405ac7..c48fe13 100644
+--- a/cosmos_framework/configs/base/reasoner/experiment/videophy2_sft_nano.py
++++ b/cosmos_framework/configs/base/reasoner/experiment/videophy2_sft_nano.py
+@@ -81,29 +81,60 @@ _TARGET_VIDEO_FPS = 2.0
+ 
+ 
+ def _decode_video_to_pil_frames(video_bytes: bytes) -> tuple[list, float]:
+-    from torchcodec.decoders import VideoDecoder
++    """Decode ``video_bytes`` into PIL frames sampled at ~``_TARGET_VIDEO_FPS``.
++
++    Prefers torchcodec; falls back to ``torchvision.io.read_video`` when
++    libtorchcodec cannot be loaded (missing/incompatible ffmpeg build).
++    """
+     from PIL import Image
+     import numpy as np
+ 
+-    decoder = VideoDecoder(video_bytes)
+-    total_frames = decoder.metadata.num_frames or 0
+-    source_fps = float(decoder.metadata.average_fps or 0.0) or 30.0
+-
+-    if total_frames <= 0:
+-        raise ValueError("video has zero frames")
+-
+-    stride = max(1, int(round(source_fps / _TARGET_VIDEO_FPS)))
+-    indices = list(range(0, total_frames, stride))
+-    if len(indices) > _MAX_VIDEO_FRAMES:
+-        step = len(indices) / _MAX_VIDEO_FRAMES
+-        indices = [indices[int(i * step)] for i in range(_MAX_VIDEO_FRAMES)]
+-
+-    frames_tensor = decoder.get_frames_at(indices=indices).data
+-    frames_np = frames_tensor.permute(0, 2, 3, 1).contiguous().cpu().numpy().astype(np.uint8)
+-    frames = [Image.fromarray(f) for f in frames_np]
+-
+-    effective_fps = source_fps / stride if stride > 0 else source_fps
+-    return frames, float(effective_fps)
++    def _select_indices(total_frames, source_fps):
++        stride = max(1, int(round(source_fps / _TARGET_VIDEO_FPS)))
++        indices = list(range(0, total_frames, stride))
++        if len(indices) > _MAX_VIDEO_FRAMES:
++            step = len(indices) / _MAX_VIDEO_FRAMES
++            indices = [indices[int(i * step)] for i in range(_MAX_VIDEO_FRAMES)]
++        effective_fps = source_fps / stride if stride > 0 else source_fps
++        return indices, float(effective_fps)
++
++    try:
++        from torchcodec.decoders import VideoDecoder
++
++        decoder = VideoDecoder(video_bytes)
++        total_frames = decoder.metadata.num_frames or 0
++        source_fps = float(decoder.metadata.average_fps or 0.0) or 30.0
++        if total_frames <= 0:
++            raise ValueError("video has zero frames")
++
++        indices, effective_fps = _select_indices(total_frames, source_fps)
++        frames_tensor = decoder.get_frames_at(indices=indices).data
++        frames_np = frames_tensor.permute(0, 2, 3, 1).contiguous().cpu().numpy().astype(np.uint8)
++        frames = [Image.fromarray(f) for f in frames_np]
++        return frames, effective_fps
++    except (ImportError, RuntimeError, OSError):
++        # torchcodec unusable (libtorchcodec load failure); use torchvision.
++        import os
++        import tempfile
++        from torchvision.io import read_video
++
++        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
++            f.write(video_bytes)
++            path = f.name
++        try:
++            vframes, _, info = read_video(path, pts_unit="sec", output_format="THWC")
++        finally:
++            os.unlink(path)
++
++        total_frames = int(vframes.shape[0])
++        source_fps = float(info.get("video_fps") or 0.0) or 30.0
++        if total_frames <= 0:
++            raise ValueError("video has zero frames")
++
++        indices, effective_fps = _select_indices(total_frames, source_fps)
++        frames_np = vframes[indices].contiguous().cpu().numpy().astype(np.uint8)
++        frames = [Image.fromarray(f) for f in frames_np]
++        return frames, effective_fps
+ 
+ 
+ def _dl(dataset_key, split, num_workers, persistent_workers=False, pin_memory=False, prefetch_factor=None):
+diff --git a/cosmos_framework/configs/toml_config/sft_config.py b/cosmos_framework/configs/toml_config/sft_config.py
+index 04d0efb..1e5c57b 100644
+--- a/cosmos_framework/configs/toml_config/sft_config.py
++++ b/cosmos_framework/configs/toml_config/sft_config.py
+@@ -13,7 +13,10 @@ from __future__ import annotations
+ from pathlib import Path
+ from typing import Any, Optional
+ 
+-import tomllib
++try:
++    import tomllib
++except ImportError:
++    import tomli as tomllib
+ from pydantic import BaseModel, ConfigDict, Field
+ 
+ from cosmos_framework.configs.toml_config.toml_config_helper import (
+diff --git a/cosmos_framework/data/generator/sequence_packing/runtime.py b/cosmos_framework/data/generator/sequence_packing/runtime.py
+index 2f80607..c22a30e 100644
+--- a/cosmos_framework/data/generator/sequence_packing/runtime.py
++++ b/cosmos_framework/data/generator/sequence_packing/runtime.py
+@@ -13,6 +13,7 @@ MAX_CAUSAL_LEN_IMAGE_BATCH = 0
+ MAX_FULL_LEN_IMAGE_BATCH = 0
+ MAX_CAUSAL_LEN_VIDEO_BATCH = 0
+ MAX_FULL_LEN_VIDEO_BATCH = 0
++FLASH_ATTN_MAX_SEQLEN_BUCKETS = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
+ 
+ 
+ def get_padding_stats() -> dict[str, int]:
+@@ -115,6 +116,28 @@ def _round_up_to_N(n: int, cp_world_size: int = 1, pad_for_cuda_graphs: bool = F
+     return n
+ 
+ 
++def _bucket_flash_attn_max_seqlen(n: int) -> int:
++    """Bucket Python max_seqlen values passed to FlashAttention.
++
++    ``torch.compile`` guards Python ints by exact value. Keeping the exact
++    per-batch max sequence length in compiled decoder layers can therefore
++    trigger one graph per batch. The exact lengths remain available through
++    ``max_*_len``; only FlashAttention's Python ``max_seqlen`` launch
++    arguments use these bucketed values.
++    """
++    if n < 0:
++        raise ValueError(f"FlashAttention max_seqlen cannot be negative, got {n}")
++    if n == 0:
++        return 0
++    for bucket in FLASH_ATTN_MAX_SEQLEN_BUCKETS:
++        if n <= bucket:
++            return bucket
++    raise ValueError(
++        f"sequence length {n} exceeds FlashAttention max_seqlen buckets "
++        f"{FLASH_ATTN_MAX_SEQLEN_BUCKETS}"
++    )
++
++
+ def _pad(
+     causal_seq: torch.Tensor, full_only_seq: torch.Tensor, max_causal_len: int, max_full_len: int
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+@@ -161,6 +184,9 @@ def init_sequence_pack(
+         max_sample_len=_max_sample_len,
+         max_causal_len=_max_causal_len,
+         max_full_len=_max_full_len,
++        fa_max_sample_len=_bucket_flash_attn_max_seqlen(_max_sample_len),
++        fa_max_causal_len=_bucket_flash_attn_max_seqlen(_max_causal_len),
++        fa_max_full_len=_bucket_flash_attn_max_seqlen(_max_full_len),
+         _causal_indices=_causal_indices,
+         _full_indices=_full_indices,
+         _causal_seq_offsets=_causal_seq_offsets,
+diff --git a/cosmos_framework/inference/common/config.py b/cosmos_framework/inference/common/config.py
+index 73d65c9..56847bb 100644
+--- a/cosmos_framework/inference/common/config.py
++++ b/cosmos_framework/inference/common/config.py
+@@ -15,7 +15,10 @@ import cattrs
+ import cattrs.preconf.json
+ import omegaconf
+ import pydantic
+-import tomllib
++try:
++    import tomllib
++except ImportError:
++    import tomli as tomllib
+ import torch
+ import yaml
+ from typing_extensions import assert_never
+diff --git a/cosmos_framework/inference/sound.py b/cosmos_framework/inference/sound.py
+index cebf39a..2485546 100644
+--- a/cosmos_framework/inference/sound.py
++++ b/cosmos_framework/inference/sound.py
+@@ -204,6 +204,10 @@ def mux_audio_into_video(
+ 
+     if audio_waveform.ndim == 1:
+         audio_waveform = audio_waveform.unsqueeze(0)
++    # torch.compile can occasionally leave invalid values in decoded audio on HCU.
++    # AAC encoding rejects NaN/Inf, so sanitize before handing data to PyAV.
++    if not torch.isfinite(audio_waveform).all():
++        audio_waveform = torch.nan_to_num(audio_waveform, nan=0.0, posinf=1.0, neginf=-1.0)
+     audio_np = audio_waveform.clamp(-1, 1).to(dtype=torch.float32).cpu().numpy()
+     channels, total_samples = audio_np.shape
+ 
+diff --git a/cosmos_framework/model/attention/backends.py b/cosmos_framework/model/attention/backends.py
+index 4236b35..af7d83d 100644
+--- a/cosmos_framework/model/attention/backends.py
++++ b/cosmos_framework/model/attention/backends.py
+@@ -128,7 +128,9 @@ def get_backend_list(arch_tag: int) -> list[str]:
+         return []
+ 
+     default_backends = []
+-    if arch_tag == 90:
++    if getattr(torch.version, "hip", None):
++        default_backends = ["flash2"]
++    elif arch_tag == 90:
+         default_backends = [
+             "flash3",
+             "natten",
+@@ -223,6 +225,24 @@ def choose_backend(
+ 
+     arch_tag = get_arch_tag(device)
+     backend_list = get_backend_list(arch_tag)
++    log.debug(f"[ATTN_DEBUG] backend_list={backend_list}")
++
++    for b in backend_list:
++        ok = is_backend_compatible(
++            backend=b,
++            query_shape=query_shape,
++            key_shape=key_shape,
++            value_shape=value_shape,
++            dtype=dtype,
++            device=device,
++            requires_grad=requires_grad,
++            is_causal=is_causal,
++            causal_type=causal_type,
++            is_varlen=is_varlen,
++            deterministic=deterministic,
++            raise_error=False,
++        )
++        log.debug(f"[ATTN_DEBUG] candidate={b} compatible={ok}")
+     for backend in backend_list:
+         if is_backend_compatible(
+             backend=backend,
+diff --git a/cosmos_framework/model/attention/flash2/__init__.py b/cosmos_framework/model/attention/flash2/__init__.py
+index 85c7cbc..2019bcd 100644
+--- a/cosmos_framework/model/attention/flash2/__init__.py
++++ b/cosmos_framework/model/attention/flash2/__init__.py
+@@ -17,7 +17,7 @@ from cosmos_framework.model.attention.utils.version import version_in_range
+ # We will have a separate backend identifier for 2025 releases with CuTeDSL
+ # kernels.
+ FLASH_ATTENTION_V2_MIN_VERSION = "2.7.0"
+-FLASH_ATTENTION_V2_MAX_VERSION = "2.7.4.post1"
++FLASH_ATTENTION_V2_MAX_VERSION = "2.8.4.post1"
+ 
+ 
+ def flash2_supported() -> bool:
+diff --git a/cosmos_framework/model/attention/flash2/checks.py b/cosmos_framework/model/attention/flash2/checks.py
+index 73fef61..be2eb7d 100644
+--- a/cosmos_framework/model/attention/flash2/checks.py
++++ b/cosmos_framework/model/attention/flash2/checks.py
+@@ -75,13 +75,6 @@ def flash2_attention_check(
+         )
+         return False
+ 
+-    if is_varlen:
+-        target_fn(
+-            "Flash Attention v2 (flash2) varlen is banned due to instability. Please choose another backend.",
+-            exception=ValueError,
+-        )
+-        return False
+-
+     arch_tag = get_arch_tag(device)
+     fwd_dtypes = get_fwd_dtypes(arch_tag)
+     bwd_dtypes = get_bwd_dtypes(arch_tag)
+diff --git a/cosmos_framework/model/attention/flash2/functions.py b/cosmos_framework/model/attention/flash2/functions.py
+index 2d1f491..fbb7d4d 100644
+--- a/cosmos_framework/model/attention/flash2/functions.py
++++ b/cosmos_framework/model/attention/flash2/functions.py
+@@ -9,7 +9,15 @@ Flash Attention v2 (flash2) Backend: intermediate APIs
+ Only safe to import when FLASH2_SUPPORTED is True.
+ """
+ 
+-from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
++import os
++
++import torch
++from flash_attn.flash_attn_interface import (
++    _wrapped_flash_attn_varlen_backward,
++    _wrapped_flash_attn_varlen_forward,
++    flash_attn_func,
++    flash_attn_varlen_func,
++)
+ from torch import Tensor
+ 
+ from cosmos_framework.model.attention.checks import assert_universal_tensor_checks
+@@ -18,6 +26,179 @@ from cosmos_framework.model.attention.masks import CausalType
+ from cosmos_framework.model.attention.utils.environment import is_torch_compiling
+ 
+ 
++def _should_mark_hcu_varlen_tokens_static() -> bool:
++    """Diagnostic switch for HCU FlashAttention varlen dynamic-shape issues.
++
++    This is not enabled by default because it specializes the token dimension
++    and can trigger recompiles for variable resolution, frame count, or prompt
++    packing. Use only for A/B isolation with COSMOS_HCU_FA_MARK_STATIC=1.
++    """
++    if not torch.version.hip or not is_torch_compiling():
++        return False
++    if os.environ.get("COSMOS_TRAINING", "").lower() in {"1", "true", "yes", "on"}:
++        return False
++    return os.environ.get("COSMOS_HCU_FA_MARK_STATIC", "").lower() in {"1", "true", "yes", "on"}
++
++
++class _CosmosFlashAttnVarlenFunc(torch.autograd.Function):
++    """FlashAttention varlen path without Python data-dependent cuseq trimming.
++
++    Some HCU FlashAttention wheels trim padded cuseq values inside
++    ``FlashAttnVarlenFunc.forward`` with boolean indexing. Under
++    ``torch.compile(fullgraph=True)`` this lowers to ``aten.nonzero`` and fails.
++    Cosmos passes already-constructed cuseq metadata, so call the registered
++    FlashAttention forward/backward ops directly and keep cuseq handling in the
++    framework.
++    """
++
++    @staticmethod
++    def forward(
++        ctx,
++        q: Tensor,
++        k: Tensor,
++        v: Tensor,
++        cu_seqlens_q: Tensor,
++        cu_seqlens_k: Tensor,
++        max_seqlen_q: int,
++        max_seqlen_k: int,
++        dropout_p: float,
++        softmax_scale: float,
++        causal: bool,
++        window_size: tuple[int, int],
++        softcap: float,
++        alibi_slopes: Tensor | None,
++        deterministic: bool,
++        return_softmax: bool,
++    ) -> Tensor | tuple[Tensor, Tensor, Tensor]:
++        cu_seqlens_q = cu_seqlens_q.clamp(max=q.shape[0])
++        cu_seqlens_k = cu_seqlens_k.clamp(max=k.shape[0])
++        out, softmax_lse, S_dmask, rng_state = _wrapped_flash_attn_varlen_forward(
++            q,
++            k,
++            v,
++            None,
++            cu_seqlens_q,
++            cu_seqlens_k,
++            None,
++            None,
++            None,
++            alibi_slopes,
++            max_seqlen_q,
++            max_seqlen_k,
++            dropout_p,
++            softmax_scale,
++            False,
++            causal,
++            window_size[0],
++            window_size[1],
++            softcap=softcap,
++            return_softmax=return_softmax and dropout_p > 0,
++        )
++        ctx.qk_headdim = q.shape[-1]
++        ctx.save_for_backward(q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state)
++        ctx.dropout_p = dropout_p
++        ctx.max_seqlen_q = max_seqlen_q
++        ctx.max_seqlen_k = max_seqlen_k
++        ctx.softmax_scale = softmax_scale
++        ctx.causal = causal
++        ctx.window_size = window_size
++        ctx.softcap = softcap
++        ctx.alibi_slopes = alibi_slopes
++        ctx.deterministic = deterministic
++        return out if not return_softmax else (out, softmax_lse, S_dmask)
++
++    @staticmethod
++    def backward(ctx, dout: Tensor, *args):
++        q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state = ctx.saved_tensors
++        dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
++        _wrapped_flash_attn_varlen_backward(
++            dout,
++            q,
++            k,
++            v,
++            out,
++            softmax_lse,
++            dq,
++            dk,
++            dv,
++            cu_seqlens_q,
++            cu_seqlens_k,
++            ctx.max_seqlen_q,
++            ctx.max_seqlen_k,
++            ctx.dropout_p,
++            ctx.softmax_scale,
++            ctx.causal,
++            ctx.window_size[0],
++            ctx.window_size[1],
++            ctx.softcap,
++            ctx.alibi_slopes,
++            ctx.deterministic,
++            rng_state=rng_state,
++        )
++        dq = dq[..., : ctx.qk_headdim]
++        dk = dk[..., : ctx.qk_headdim]
++        dv = dv[..., : dout.shape[-1]]
++        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
++
++
++def _cosmos_flash_attn_varlen_func(
++    q: Tensor,
++    k: Tensor,
++    v: Tensor,
++    cu_seqlens_q: Tensor,
++    cu_seqlens_k: Tensor,
++    max_seqlen_q: int,
++    max_seqlen_k: int,
++    dropout_p: float = 0.0,
++    softmax_scale: float | None = None,
++    causal: bool = False,
++    window_size: tuple[int, int] = (-1, -1),
++    softcap: float = 0.0,
++    alibi_slopes: Tensor | None = None,
++    deterministic: bool = False,
++    return_attn_probs: bool = False,
++    **kwargs,
++) -> Tensor | tuple[Tensor, Tensor, Tensor]:
++    if kwargs:
++        return flash_attn_varlen_func(
++            q=q,
++            k=k,
++            v=v,
++            cu_seqlens_q=cu_seqlens_q,
++            cu_seqlens_k=cu_seqlens_k,
++            max_seqlen_q=max_seqlen_q,
++            max_seqlen_k=max_seqlen_k,
++            dropout_p=dropout_p,
++            softmax_scale=softmax_scale,
++            causal=causal,
++            window_size=window_size,
++            softcap=softcap,
++            alibi_slopes=alibi_slopes,
++            deterministic=deterministic,
++            return_attn_probs=return_attn_probs,
++            **kwargs,
++        )
++    if softmax_scale is None:
++        softmax_scale = q.shape[-1] ** (-0.5)
++    return _CosmosFlashAttnVarlenFunc.apply(
++        q,
++        k,
++        v,
++        cu_seqlens_q,
++        cu_seqlens_k,
++        max_seqlen_q,
++        max_seqlen_k,
++        dropout_p,
++        softmax_scale,
++        causal,
++        window_size,
++        softcap,
++        alibi_slopes,
++        deterministic,
++        return_attn_probs,
++    )
++
++
+ def flash2_attention(
+     query: Tensor,
+     key: Tensor,
+@@ -129,10 +310,15 @@ def flash2_attention(
+         k = key.squeeze(0)  # [total_tokens,Hkv,D]
+         v = value.squeeze(0)  # [total_tokens,Hkv,Dv]
+         assert q.dim() == k.dim() == v.dim() == 3
+-        out, lse_, _ = flash_attn_varlen_func(
+-            q=query.squeeze(0),
+-            k=key.squeeze(0),
+-            v=value.squeeze(0),
++        if _should_mark_hcu_varlen_tokens_static():
++            torch._dynamo.mark_static(q, 0)
++            torch._dynamo.mark_static(k, 0)
++            torch._dynamo.mark_static(v, 0)
++        varlen_func = _cosmos_flash_attn_varlen_func if torch.version.hip else flash_attn_varlen_func
++        out, lse_, _ = varlen_func(
++            q=q,
++            k=k,
++            v=v,
+             cu_seqlens_q=cumulative_seqlen_Q,
+             cu_seqlens_k=cumulative_seqlen_KV,
+             max_seqlen_q=max_seqlen_Q,
+diff --git a/cosmos_framework/model/attention/utils/__init__.py b/cosmos_framework/model/attention/utils/__init__.py
+index 67eaaae..6e20a44 100644
+--- a/cosmos_framework/model/attention/utils/__init__.py
++++ b/cosmos_framework/model/attention/utils/__init__.py
+@@ -19,17 +19,25 @@ from cosmos_framework.model.attention.utils.safe_ops import log
+ 
+ def get_arch_tag(device: torch.device | None = None) -> int:
+     """
+-    Returns the compute capability of a given torch device if it's a CUDA device, otherwise returns 0.
++    Returns the compute capability of a given torch CUDA/HIP device, otherwise returns 0.
+ 
+-    Args:
+-        device (torch.device | None): torch device. Uses default device if None.
+-
+-    Returns:
+-        device_cc (int): compute capability in the SmXXX format (i.e. 90 for Hopper).
++    HCU uses the torch.cuda API on top of HIP, so torch.version.cuda is None even
++    when a CUDA-like accelerator is available. Keep the NVIDIA path unchanged and
++    allow HIP-backed devices to report an architecture tag for backend selection.
+     """
+-    if torch.cuda.is_available() and torch.version.cuda and (device is None or device.type == "cuda"):
+-        major, minor = torch.cuda.get_device_capability(device)
+-        return major * 10 + minor
++    is_cuda_like = torch.cuda.is_available() and (torch.version.cuda or getattr(torch.version, "hip", None))
++    if is_cuda_like and (device is None or device.type == "cuda"):
++        try:
++            major, minor = torch.cuda.get_device_capability(device)
++            arch_tag = major * 10 + minor
++            if arch_tag > 0:
++                return arch_tag
++        except Exception as e:
++            log.debug(f"Could not query CUDA/HIP device capability: {e}")
++
++        if getattr(torch.version, "hip", None):
++            return 90
++
+     return 0
+ 
+ 
+diff --git a/cosmos_framework/model/generator/algorithm/loss/cross_entropy.py b/cosmos_framework/model/generator/algorithm/loss/cross_entropy.py
+index 283b136..cb542bd 100644
+--- a/cosmos_framework/model/generator/algorithm/loss/cross_entropy.py
++++ b/cosmos_framework/model/generator/algorithm/loss/cross_entropy.py
+@@ -32,6 +32,7 @@ import torch
+ import torch.distributed as dist
+ import torch.nn.functional as F
+ 
++from cosmos_framework.utils.fsdp_ordered_comm import ordered_all_reduce
+ from cosmos_framework.utils.generator.reasoner.constant import IGNORE_INDEX
+ 
+ 
+@@ -92,7 +93,7 @@ def cross_entropy_loss(
+     n_valid_tokens = (shifted_labels != ignore_index).sum()
+     num_dp_workers = 1
+     if dp_group is not None:
+-        dist.all_reduce(n_valid_tokens, op=dist.ReduceOp.SUM, group=dp_group)
++        ordered_all_reduce(n_valid_tokens, op=dist.ReduceOp.SUM, group=dp_group)
+         num_dp_workers = dist.get_world_size(group=dp_group)
+ 
+     loss = per_token_loss.sum() / (n_valid_tokens + 1e-8) * (num_dp_workers * loss_scaling_factor)
+diff --git a/cosmos_framework/model/generator/mot/attention.py b/cosmos_framework/model/generator/mot/attention.py
+index f0d8766..ef61365 100644
+--- a/cosmos_framework/model/generator/mot/attention.py
++++ b/cosmos_framework/model/generator/mot/attention.py
+@@ -85,6 +85,13 @@ from cosmos_framework.data.generator.sequence_packing.runtime import (
+ )
+ 
+ 
++def _fa_max_len(pack: SequencePack, key: str) -> int:
++    fa_key = f"fa_{key}"
++    if torch.version.hip and torch.compiler.is_compiling() and fa_key in pack:
++        return pack[fa_key]
++    return pack[key]
++
++
+ def two_way_attention(
+     packed_query_states: SequencePack,
+     packed_key_states: SequencePack,
+@@ -122,8 +129,8 @@ def two_way_attention(
+         causal_v.unsqueeze(0),  # [1,N_und,heads,head_dim]
+         cumulative_seqlen_Q=causal_q_offsets,
+         cumulative_seqlen_KV=causal_k_offsets,
+-        max_seqlen_Q=packed_query_states["max_causal_len"],
+-        max_seqlen_KV=packed_query_states["max_causal_len"],
++        max_seqlen_Q=_fa_max_len(packed_query_states, "max_causal_len"),
++        max_seqlen_KV=_fa_max_len(packed_query_states, "max_causal_len"),
+         is_causal=True,
+         causal_type=CausalType.DontCare if use_dont_care_mask else CausalType.TopLeft,
+     )  # [1,N_und,heads,head_dim]
+@@ -137,8 +144,8 @@ def two_way_attention(
+         get_all_seq(packed_value_states).unsqueeze(0),  # [1,N_all,heads,head_dim]
+         cumulative_seqlen_Q=full_q_offsets,
+         cumulative_seqlen_KV=sample_offsets,
+-        max_seqlen_Q=packed_query_states["max_full_len"],
+-        max_seqlen_KV=packed_query_states["max_sample_len"],
++        max_seqlen_Q=_fa_max_len(packed_query_states, "max_full_len"),
++        max_seqlen_KV=_fa_max_len(packed_query_states, "max_sample_len"),
+     )  # [1,N_full,heads,head_dim]
+ 
+     # [1,N_full,heads,head_dim] -> [N_full,heads,head_dim] -> [N_full,heads*head_dim]
+@@ -214,8 +221,8 @@ def three_way_attention(
+         causal_v.unsqueeze(0),  # [1,N_und,heads,head_dim]
+         cumulative_seqlen_Q=causal_q_offsets,
+         cumulative_seqlen_KV=causal_k_offsets,
+-        max_seqlen_Q=packed_query_states["max_causal_len"],
+-        max_seqlen_KV=packed_query_states["max_causal_len"],
++        max_seqlen_Q=_fa_max_len(packed_query_states, "max_causal_len"),
++        max_seqlen_KV=_fa_max_len(packed_query_states, "max_causal_len"),
+         is_causal=True,
+         causal_type=CausalType.DontCare if use_dont_care_mask else CausalType.TopLeft,
+     )  # [1,N_und,heads,head_dim]
+@@ -230,8 +237,8 @@ def three_way_attention(
+             full_v.unsqueeze(0),  # [1,N_full,heads,head_dim]
+             cumulative_seqlen_Q=full_q_offsets,
+             cumulative_seqlen_KV=full_k_offsets,
+-            max_seqlen_Q=packed_query_states["max_full_len"],
+-            max_seqlen_KV=packed_query_states["max_full_len"],
++            max_seqlen_Q=_fa_max_len(packed_query_states, "max_full_len"),
++            max_seqlen_KV=_fa_max_len(packed_query_states, "max_full_len"),
+             return_lse=True,
+         )  # full_sa: [1,N_full,heads,head_dim], full_sa_lse: [1,N_full,heads]
+     else:
+@@ -250,8 +257,8 @@ def three_way_attention(
+         causal_v.unsqueeze(0),  # [1,N_und,heads,head_dim]
+         cumulative_seqlen_Q=full_q_offsets,
+         cumulative_seqlen_KV=causal_k_normalized_offsets,
+-        max_seqlen_Q=packed_query_states["max_full_len"],
+-        max_seqlen_KV=packed_query_states["max_causal_len"],
++        max_seqlen_Q=_fa_max_len(packed_query_states, "max_full_len"),
++        max_seqlen_KV=_fa_max_len(packed_query_states, "max_causal_len"),
+         return_lse=True,
+     )  # full_ca: [1,N_full,heads,head_dim], full_ca_lse: [1,N_full,heads]
+ 
+@@ -322,8 +329,8 @@ def multi_control_two_way_attention(
+         causal_v.unsqueeze(0),
+         cumulative_seqlen_Q=causal_q_offsets,
+         cumulative_seqlen_KV=causal_k_offsets,
+-        max_seqlen_Q=packed_query_states["max_causal_len"],
+-        max_seqlen_KV=packed_query_states["max_causal_len"],
++        max_seqlen_Q=_fa_max_len(packed_query_states, "max_causal_len"),
++        max_seqlen_KV=_fa_max_len(packed_query_states, "max_causal_len"),
+         is_causal=True,
+         causal_type=CausalType.DontCare if use_dont_care_mask else CausalType.TopLeft,
+     )
+diff --git a/cosmos_framework/model/generator/parallelize_vlm.py b/cosmos_framework/model/generator/parallelize_vlm.py
+index 57a80c5..45e0954 100644
+--- a/cosmos_framework/model/generator/parallelize_vlm.py
++++ b/cosmos_framework/model/generator/parallelize_vlm.py
+@@ -14,7 +14,7 @@ and its meshes — stays in ``vfm/utils/parallelism.py``.
+ """
+ 
+ import torch.nn as nn
+-from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
++from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
+ 
+ from cosmos_framework.utils import log
+ from cosmos_framework.configs.base.defaults.compile import CompileConfig
+@@ -23,6 +23,7 @@ from cosmos_framework.configs.base.defaults.parallelism import (
+     ParallelismConfig,
+ )
+ from cosmos_framework.model.generator.hf_model import HFModel
++from cosmos_framework.utils.fsdp_ordered_comm import OrderedAllGather, OrderedReduceScatter
+ from cosmos_framework.utils.generator.parallelism import ParallelDims
+ 
+ 
+@@ -173,6 +174,14 @@ def apply_fsdp(
+     else:
+         fsdp_mesh = parallel_dims.dp_shard_mesh
+     fsdp_kwargs = {"mesh": fsdp_mesh, "mp_policy": mp_policy}
++    all_gather_comm = OrderedAllGather()
++    reduce_scatter_comm = OrderedReduceScatter()
++
++    def fully_shard_with_ordered_comm(module: nn.Module) -> None:
++        fully_shard(module, **fsdp_kwargs)
++        assert isinstance(module, FSDPModule)
++        module.set_custom_all_gather(all_gather_comm)
++        module.set_custom_reduce_scatter(reduce_scatter_comm)
+ 
+     inner = model.model
+ 
+@@ -186,7 +195,7 @@ def apply_fsdp(
+     # the collected list (not re-scanning by typename) is robust to the in-place
+     # compile above and to fully_shard's per-block __class__ swap.
+     for block in reversed(blocks):
+-        fully_shard(block, **fsdp_kwargs)
++        fully_shard_with_ordered_comm(block)
+     log.info(f"Wrapped {len(blocks)} sub-modules.")
+ 
+     # Wrap the full inner model to cover remaining parameters
+@@ -195,8 +204,8 @@ def apply_fsdp(
+     # wired through to any active recipe and the path was untested; see the
+     # comment in vlm_model._init_vlm meta-materialize block (search for
+     # "FSDP-2 CPU offload") for how to re-enable it.
+-    fully_shard(inner, **fsdp_kwargs)
+-    log.info("parallelize: FSDP2 applied to HFModel.model")
++    fully_shard_with_ordered_comm(inner)
++    log.info("parallelize: FSDP2 applied with one collective submission stream per process group")
+ 
+ 
+ def parallelize(
+diff --git a/cosmos_framework/model/generator/vlm_model.py b/cosmos_framework/model/generator/vlm_model.py
+index e76970a..9309a77 100644
+--- a/cosmos_framework/model/generator/vlm_model.py
++++ b/cosmos_framework/model/generator/vlm_model.py
+@@ -28,6 +28,7 @@ import torch.nn as nn
+ from cosmos_framework.utils.lazy_config import instantiate
+ from cosmos_framework.model._base import ImaginaireModel
+ from cosmos_framework.utils import log
++from cosmos_framework.utils.fsdp_ordered_comm import ordered_all_reduce
+ from cosmos_framework.model.generator.algorithm.loss.cross_entropy import cross_entropy_loss, weighted_cross_entropy_loss
+ from cosmos_framework.configs.base.defaults.parallelism import PRECISION_TO_TORCH_DTYPE
+ from cosmos_framework.configs.base.reasoner.defaults.policy_config import VLMModelConfig
+@@ -522,7 +523,7 @@ class VLMModel(ImaginaireModel):
+         dp_mesh = pd.dp_mesh if pd is not None else None
+         if torch.distributed.is_initialized() and dp_mesh is not None:
+             sub_dim = "dp_shard" if pd.dp_shard_enabled else "dp_replicate"
+-            torch.distributed.all_reduce(
++            ordered_all_reduce(
+                 loss_avg, op=torch.distributed.ReduceOp.AVG, group=dp_mesh[sub_dim].get_group()
+             )
+         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+diff --git a/cosmos_framework/scripts/train.py b/cosmos_framework/scripts/train.py
+index 07ef26a..8a4b917 100644
+--- a/cosmos_framework/scripts/train.py
++++ b/cosmos_framework/scripts/train.py
+@@ -24,8 +24,12 @@ win over TOML).
+ from __future__ import annotations
+ 
+ import argparse
++import importlib.metadata as importlib_metadata
++import importlib.util
++import io
+ import os
+ import traceback
++import types
+ 
+ import torch
+ from loguru import logger as logging
+@@ -40,6 +44,79 @@ from cosmos_framework.utils.training_telemetry import telemetry
+ from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
+ 
+ 
++def _install_torchcodec_pyav_fallback() -> None:
++    """Install a minimal PyAV-backed torchcodec shim when torchcodec is unavailable."""
++    try:
++        importlib_metadata.version("torchcodec")
++        from torchcodec.decoders import VideoDecoder  # noqa: F401
++
++        return
++    except Exception:
++        pass
++
++    import av
++
++    original_version = importlib_metadata.version
++
++    def version_with_torchcodec(package_name: str) -> str:
++        if package_name == "torchcodec":
++            return "0.3.0"
++        return original_version(package_name)
++
++    importlib_metadata.version = version_with_torchcodec
++
++    class _VideoDecoder:
++        def __init__(self, source, *args, **kwargs) -> None:
++            del args, kwargs
++            if isinstance(source, bytes):
++                source = io.BytesIO(source)
++            elif isinstance(source, bytearray):
++                source = io.BytesIO(bytes(source))
++            elif hasattr(source, "read") and hasattr(source, "seek"):
++                source.seek(0)
++
++            container = av.open(source)
++            stream = container.streams.video[0]
++            frames = [torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1) for frame in container.decode(stream)]
++            if not frames:
++                raise ValueError("video has zero frames")
++            self._frames = torch.stack(frames)
++            fps = float(stream.average_rate) if stream.average_rate else 30.0
++            _, height, width = self._frames.shape[1:]
++            self.metadata = types.SimpleNamespace(
++                num_frames=len(frames),
++                average_fps=fps,
++                height=int(height),
++                width=int(width),
++            )
++
++        def get_frames_at(self, indices=None, **kwargs):
++            if indices is None:
++                indices = kwargs["indices"]
++            if isinstance(indices, torch.Tensor):
++                indices = indices.cpu().tolist()
++            return types.SimpleNamespace(data=self._frames[indices])
++
++    class _AudioDecoder:
++        def __init__(self, *args, **kwargs) -> None:
++            raise ImportError("TorchCodec AudioDecoder is unavailable in the PyAV fallback")
++
++    torchcodec_module = types.ModuleType("torchcodec")
++    torchcodec_decoders = types.ModuleType("torchcodec.decoders")
++    torchcodec_module.__spec__ = importlib.util.spec_from_loader("torchcodec", loader=None, is_package=True)
++    torchcodec_decoders.__spec__ = importlib.util.spec_from_loader("torchcodec.decoders", loader=None)
++    torchcodec_decoders.VideoDecoder = _VideoDecoder
++    torchcodec_decoders.AudioDecoder = _AudioDecoder
++    torchcodec_module.decoders = torchcodec_decoders
++    import sys
++
++    sys.modules["torchcodec"] = torchcodec_module
++    sys.modules["torchcodec.decoders"] = torchcodec_decoders
++
++
++_install_torchcodec_pyav_fallback()
++
++
+ # ---------------------------------------------------------------------------
+ # --deterministic: mirrors launch_vfm.sh determinism settings.
+ # ---------------------------------------------------------------------------
+diff --git a/cosmos_framework/utils/distributed.py b/cosmos_framework/utils/distributed.py
+index 64e0de7..3e0c11a 100644
+--- a/cosmos_framework/utils/distributed.py
++++ b/cosmos_framework/utils/distributed.py
+@@ -35,10 +35,12 @@ def init() -> int | None:
+     if dist.is_initialized():
+         return torch.cuda.current_device()
+ 
+-    # Set GPU affinity.
+-    pynvml.nvmlInit()
+     local_rank = int(os.getenv("LOCAL_RANK", 0))
++    # Set GPU affinity when NVML is available. HCU/HIP environments commonly do
++    # not provide libnvidia-ml.so; affinity is an optimization, not required for
++    # distributed initialization.
+     try:
++        pynvml.nvmlInit()
+         device = Device(local_rank)
+         os.sched_setaffinity(0, device.get_cpu_affinity())
+     except pynvml.NVMLError as e:
+diff --git a/cosmos_framework/utils/fsdp_ordered_comm.py b/cosmos_framework/utils/fsdp_ordered_comm.py
+new file mode 100644
+index 0000000..0153db4
+--- /dev/null
++++ b/cosmos_framework/utils/fsdp_ordered_comm.py
+@@ -0,0 +1,148 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: OpenMDW-1.1
++
++"""Ordered FSDP collective submission streams.
++
++NCCL-compatible backends require collectives for one communicator to be
++submitted in the same global order. FSDP2 intentionally uses separate streams
++for local copy/compute overlap, so the communication call itself is handed off
++to one stream per process group while the surrounding local work stays on the
++FSDP-managed streams.
++"""
++
++import threading
++from collections.abc import Iterator, Sequence
++from contextlib import contextmanager
++
++import torch
++import torch.distributed as dist
++from torch.distributed.tensor import DTensor
++from torch.distributed.tensor.placement_types import Partial, Replicate
++
++
++_streams: dict[tuple[str, int, dist.ProcessGroup], torch.Stream] = {}
++_streams_lock = threading.RLock()
++
++
++def _group_key(
++    group: dist.ProcessGroup, device: torch.device
++) -> tuple[str, int, dist.ProcessGroup]:
++    device_index = device.index if device.index is not None else torch.cuda.current_device()
++    return device.type, device_index, group
++
++
++def _get_group_stream(group: dist.ProcessGroup, device: torch.device) -> torch.Stream:
++    key = _group_key(group, device)
++    with _streams_lock:
++        stream = _streams.get(key)
++        if stream is None:
++            with torch.cuda.device(key[1]):
++                stream = torch.cuda.Stream(device=key[1])
++            _streams[key] = stream
++        return stream
++
++
++@contextmanager
++def _ordered_group_stream(
++    group: dist.ProcessGroup, device: torch.device
++) -> Iterator[None]:
++    """Run one collective on the process group's canonical submission stream."""
++    caller_stream = torch.cuda.current_stream(device)
++    collective_stream = _get_group_stream(group, device)
++    with _streams_lock:
++        collective_stream.wait_stream(caller_stream)
++        with torch.cuda.stream(collective_stream):
++            yield
++        caller_stream.wait_stream(collective_stream)
++
++
++class OrderedAllGather:
++    """FSDP2 all-gather implementation with per-process-group stream ordering."""
++
++    def allocate(
++        self,
++        size: Sequence[int | torch.SymInt],
++        *,
++        dtype: torch.dtype,
++        device: torch.device,
++    ) -> torch.Tensor:
++        return torch.empty(*size, dtype=dtype, device=device)
++
++    def __call__(
++        self,
++        output_tensor: torch.Tensor,
++        input_tensor: torch.Tensor,
++        group: dist.ProcessGroup,
++        async_op: bool = False,
++    ) -> dist.Work | None:
++        with _ordered_group_stream(group, input_tensor.device):
++            return dist.all_gather_into_tensor(
++                output_tensor,
++                input_tensor,
++                group=group,
++                async_op=async_op,
++            )
++
++
++class OrderedReduceScatter:
++    """FSDP2 reduce-scatter implementation with per-process-group stream ordering."""
++
++    def allocate(
++        self,
++        size: Sequence[int | torch.SymInt],
++        *,
++        dtype: torch.dtype,
++        device: torch.device,
++    ) -> torch.Tensor:
++        return torch.empty(*size, dtype=dtype, device=device)
++
++    def __call__(
++        self,
++        output_tensor: torch.Tensor,
++        input_tensor: torch.Tensor,
++        group: dist.ProcessGroup,
++        op: dist.ReduceOp,
++        async_op: bool = False,
++    ) -> dist.Work | None:
++        with _ordered_group_stream(group, input_tensor.device):
++            return dist.reduce_scatter_tensor(
++                output_tensor,
++                input_tensor,
++                group=group,
++                op=op,
++                async_op=async_op,
++            )
++
++
++def ordered_all_reduce(
++    tensor: torch.Tensor,
++    op: dist.ReduceOp = dist.ReduceOp.SUM,
++    group: dist.ProcessGroup | None = None,
++    async_op: bool = False,
++) -> dist.Work | None:
++    """Submit an all-reduce on the process group's canonical stream."""
++    if group is None:
++        group = dist.group.WORLD
++    with _ordered_group_stream(group, tensor.device):
++        return dist.all_reduce(tensor, op=op, group=group, async_op=async_op)
++
++
++def materialize_dtensor_norm(norm: DTensor) -> torch.Tensor:
++    """Reduce a DTensor norm while preserving per-communicator stream order.
++
++    A norm DTensor contains only Replicate and norm-specific Partial placements.
++    Reducing each partial placement explicitly is equivalent to full_tensor(),
++    while exposing the process-group boundary needed to choose the same
++    submission stream used by FSDP collectives.
++    """
++    local_norm = norm.to_local()
++    mesh = norm.device_mesh
++    for mesh_dim, placement in enumerate(norm.placements):
++        if isinstance(placement, Replicate):
++            continue
++        if not isinstance(placement, Partial):
++            raise RuntimeError(f"Unexpected gradient norm DTensor placement: {placement}")
++        group = mesh.get_group(mesh_dim)
++        with _ordered_group_stream(group, local_norm.device):
++            local_norm = placement._reduce_value(local_norm, mesh, mesh_dim)
++    return local_norm
+diff --git a/cosmos_framework/utils/generator/hf_attention_cosmos.py b/cosmos_framework/utils/generator/hf_attention_cosmos.py
+index a25c43e..d2f19da 100644
+--- a/cosmos_framework/utils/generator/hf_attention_cosmos.py
++++ b/cosmos_framework/utils/generator/hf_attention_cosmos.py
+@@ -85,7 +85,13 @@ def hf_attention_cosmos(
+         v = v.to(torch.bfloat16)
+ 
+     is_causal = bool(getattr(module, "is_causal", False))
+-    causal_type = CausalType.TopLeft if is_causal else None
++    if is_causal:
++        # For square self-attention, top-left and bottom-right causal masks are
++        # identical. DontCare lets FlashAttention2 accept the mathematically
++        # equivalent layout while preserving strict rejection for unequal Q/K.
++        causal_type = CausalType.DontCare if q.shape[1] == k.shape[1] else CausalType.TopLeft
++    else:
++        causal_type = None
+ 
+     out = imag_attention(
+         q,
+diff --git a/examples/README.md b/examples/README.md
+index 0e51140..ed22ec8 100644
+--- a/examples/README.md
++++ b/examples/README.md
+@@ -16,3 +16,8 @@ This directory contains:
+ | Vision SFT LoRA (Cosmos3-Super)              | `launch_sft_vision_super.sh`          |
+ | Reasoner Alignment SFT                       | `launch_sft_llava_ov.sh`              |
+ | Reasoner Alignment SFT (Cosmos3-Nano)        | `launch_sft_videophy2_nano.sh`        |
++
++### HCU smoke entries
++
++- `launch_sft_reasoner_videophy2_nano_hcu.sh` — HCU Reasoner smoke using `cosmos_framework.scripts.train` directly.
++- `launch_sft_generator_vision_nano_hcu.sh` — HCU Generator vision smoke using `cosmos_framework.scripts.train` directly.
+diff --git a/examples/launch_sft_generator_vision_nano_hcu.sh b/examples/launch_sft_generator_vision_nano_hcu.sh
+new file mode 100755
+index 0000000..04f007c
+--- /dev/null
++++ b/examples/launch_sft_generator_vision_nano_hcu.sh
+@@ -0,0 +1,43 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Generator Vision Nano SFT recipe.
++# Keep model/training/compile parameters in the official TOML; this file only
++# supplies HCU topology and local data/checkpoint paths.
++
++set -euo pipefail
++
++TOML_FILE="examples/toml/sft_config/vision_sft_nano.toml"
++
++DATASET_PATH="/data/Cosmos/datasets/BridgeData2-Subset-Synthetic-Captions/sft_dataset_bridge"
++BASE_CHECKPOINT_PATH="/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP"
++WAN_VAE_PATH="/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth"
++LOCAL_PROCESSOR_DIR="/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano"
++RUN_NAME="generator_vision_sft_nano_hcu_perf_4card"
++OUTPUT_ROOT="/data/Cosmos/cosmos/outputs/hcu_training"
++LOG_FILENAME="${RUN_NAME}.log"
++HIP_VISIBLE_DEVICES="4,5,6,7"
++NPROC_PER_NODE=4
++MASTER_PORT=29712
++
++export COSMOS_TRAINING=true
++export HF_HUB_OFFLINE=1
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS=1
++export PYTHONUNBUFFERED=1
++
++EXTRA_DATASET_CHECK='[[ -f "$DATASET_PATH/train/video_dataset_file.jsonl" ]] || { echo "ERROR: missing $DATASET_PATH/train/video_dataset_file.jsonl" >&2; exit 1; }
++[[ -f "$BASE_CHECKPOINT_PATH/checkpoint.json" ]] || { echo "ERROR: missing $BASE_CHECKPOINT_PATH/checkpoint.json" >&2; exit 1; }
++compgen -G "$BASE_CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $BASE_CHECKPOINT_PATH/model" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.vlm_config.tokenizer.local_processor_dir=${LOCAL_PROCESSOR_DIR}"
++    "trainer.seed=42"
++    "trainer.max_iter=70"
++    "checkpoint.save_iter=1000"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"
+diff --git a/examples/launch_sft_reasoner_videophy2_nano_hcu.sh b/examples/launch_sft_reasoner_videophy2_nano_hcu.sh
+new file mode 100755
+index 0000000..50d334d
+--- /dev/null
++++ b/examples/launch_sft_reasoner_videophy2_nano_hcu.sh
+@@ -0,0 +1,44 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official VideoPhy-2 Nano SFT recipe.
++# Keep model/training parameters in the official TOML; this file only supplies
++# HCU topology and local data/checkpoint paths.
++
++set -euo pipefail
++
++TOML_FILE="examples/toml/sft_config/videophy2_sft_nano.toml"
++
++VIDEOPHYSICS_ROOT="/data/Cosmos/datasets/videophysics_iter2_repro"
++VLM_MODEL_NAME="/public/opendas/DL_DATA/llm-models/qwen3/Qwen3-VL-8B-Instruct"
++VLM_SAFETENSORS_PATH="/data/Cosmos/checkpoints/Cosmos3-Nano-VLM"
++RUN_NAME="reasoner_videophy2_nano_hcu_perf_4card"
++OUTPUT_ROOT="/data/Cosmos/cosmos/outputs/hcu_training"
++LOG_FILENAME="${RUN_NAME}.log"
++HIP_VISIBLE_DEVICES="4,5,6,7"
++NPROC_PER_NODE=4
++MASTER_PORT=29711
++
++export COSMOS_TRAINING=true
++export HF_HUB_OFFLINE=1
++export HIP_VISIBLE_DEVICES
++export OMP_NUM_THREADS=1
++export PYTHONUNBUFFERED=1
++export VIDEOPHYSICS_ROOT
++
++EXTRA_DATASET_CHECK='[[ -f "$VIDEOPHYSICS_ROOT/videophy2_train/meta.json" ]] || { echo "ERROR: missing $VIDEOPHYSICS_ROOT/videophy2_train/meta.json" >&2; exit 1; }'
++
++TAIL_OVERRIDES=(
++    "job.wandb_mode=disabled"
++    "job.name=${RUN_NAME}"
++    "model.config.policy.backbone.model_name=${VLM_MODEL_NAME}"
++    "model.config.policy.backbone.safetensors_path=${VLM_SAFETENSORS_PATH}"
++    "model.config.parallelism.data_parallel_shard_degree=${NPROC_PER_NODE}"
++    "trainer.seed=42"
++    "trainer.max_iter=70"
++    "checkpoint.save_iter=1000"
++)
++TAIL_OVERRIDES+=("$@")
++
++echo ">>> HCU devices: ${HIP_VISIBLE_DEVICES}"
++echo ">>> HCU FSDP communication ordering: framework"
++
++source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"

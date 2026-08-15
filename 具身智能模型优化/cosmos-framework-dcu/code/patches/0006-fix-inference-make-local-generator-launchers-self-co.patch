@@ -1,0 +1,1221 @@
+From 6e983bd461c03ed2d078154e6d75caa4721c8c58 Mon Sep 17 00:00:00 2001
+From: iMountTai <2506700016@qq.com>
+Date: Tue, 11 Aug 2026 15:11:50 +0800
+Subject: [PATCH 6/6] fix(inference): make local generator launchers
+ self-contained
+
+---
+ cosmos_framework/inference/common/args.py     |  11 +-
+ .../inference/common/args_test.py             |  15 +
+ docs/inference.md                             |  19 +-
+ .../inference_py310_compat/sitecustomize.py   |  33 ++
+ ...nch_inference_generator_vision_nano_hcu.sh | 185 +++++++++
+ ...ence_generator_vision_nano_nvidia_local.sh | 177 +++++++++
+ ...ch_inference_generator_vision_super_hcu.sh |  42 +++
+ ...nce_generator_vision_super_nvidia_local.sh |  39 ++
+ inputs/omni/i2v_local_hcu.json                |   6 +
+ inputs/omni/i2v_local_nvidia.json             |   6 +
+ tests/local_inference_launcher_test.py        | 206 +++++++++++
+ tools/run_framework_inference_local_assets.py | 350 ++++++++++++++++++
+ 12 files changed, 1081 insertions(+), 8 deletions(-)
+ create mode 100644 examples/inference_py310_compat/sitecustomize.py
+ create mode 100644 examples/launch_inference_generator_vision_nano_hcu.sh
+ create mode 100644 examples/launch_inference_generator_vision_nano_nvidia_local.sh
+ create mode 100644 examples/launch_inference_generator_vision_super_hcu.sh
+ create mode 100644 examples/launch_inference_generator_vision_super_nvidia_local.sh
+ create mode 100644 inputs/omni/i2v_local_hcu.json
+ create mode 100644 inputs/omni/i2v_local_nvidia.json
+ create mode 100644 tests/local_inference_launcher_test.py
+ create mode 100644 tools/run_framework_inference_local_assets.py
+
+diff --git a/cosmos_framework/inference/common/args.py b/cosmos_framework/inference/common/args.py
+index 003de22..970f59c 100644
+--- a/cosmos_framework/inference/common/args.py
++++ b/cosmos_framework/inference/common/args.py
+@@ -558,13 +558,12 @@ class CheckpointOverrides(ConfigOverrides):
+                 checkpoint_dir = checkpoint_dir / "model"
+             self.checkpoint_path = str(checkpoint_dir)
+             self.checkpoint_type = CheckpointType.from_path(checkpoint_dir)
+-            # Local HF dir with no explicit --config-file: fall back to the
+-            # dir's own config.json (mirrors the registry branch and
+-            # from_pretrained_dcp). Without this, config_file stays at the
+-            # default .py module, which needs a Hydra experiment that a local
+-            # HF dir cannot supply -> MissingConfigException("experiment/").
++            # Local HF or converted DCP dir with no explicit --config-file:
++            # fall back to the dir's own config.json. A self-describing local
++            # checkpoint must not require the training experiment path used
++            # by ordinary DCP checkpoints.
+             if (
+-                self.checkpoint_type == CheckpointType.HF
++                self.checkpoint_type in (CheckpointType.HF, CheckpointType.DCP)
+                 and self.config_file == DEFAULT_CONFIG_FILE
+                 and (checkpoint_dir / "config.json").is_file()
+             ):
+diff --git a/cosmos_framework/inference/common/args_test.py b/cosmos_framework/inference/common/args_test.py
+index ae56295..f3de354 100644
+--- a/cosmos_framework/inference/common/args_test.py
++++ b/cosmos_framework/inference/common/args_test.py
+@@ -111,6 +111,21 @@ def test_parse_checkpoint_path(tmp_path: Path):
+         == "t2i_mot_exp000_015_qwen3_0p6b_256res_frozen_llm_lr_4e4_large_seq_no_llm_qknorm_gcp_bs8k_baseline_long_run_1e4"
+     )
+ 
++    # Self-describing local DCP checkpoint
++    self_describing_dcp_path = tmp_path / "portable_dcp"
++    self_describing_dcp_path.mkdir()
++    (self_describing_dcp_path / ".metadata").touch()
++    (self_describing_dcp_path / "__0_0.distcp").touch()
++    config_path = self_describing_dcp_path / "config.json"
++    config_path.write_text("{}", encoding="utf-8")
++    args = CheckpointOverrides(
++        checkpoint_path=str(self_describing_dcp_path),
++    ).build_checkpoint(checkpoints=CHECKPOINTS)
++    assert args.checkpoint_type == "dcp"
++    assert args.config_file == str(config_path)
++    assert args.config_file_type == "json"
++    assert args.experiment == ""
++
+     # S3 DCP checkpoint
+     args = CheckpointOverrides(
+         checkpoint_path=f"s3://bucket/cosmos3_vfm/t2i_mot_0p6b_qwen3_vl_ablations/t2i_mot_exp000_015_qwen3_0p6b_256res_frozen_llm_lr_4e4_large_seq_no_llm_qknorm_gcp_bs8k_baseline_long_run_1e4/checkpoints/iter_000700000/model",
+diff --git a/docs/inference.md b/docs/inference.md
+index cad7c44..550d77c 100644
+--- a/docs/inference.md
++++ b/docs/inference.md
+@@ -76,7 +76,7 @@ python -m cosmos_framework.scripts.inference \
+ 
+ ### Multi-GPU
+ 
+-Use `torchrun --nproc-per-node=N` when launching across multiple GPUs (N > 1). By default the model weights are sharded (FSDP) across all N GPUs, so any model fits. The `throughput` preset runs that single sharded replica over a batch; the `latency` preset additionally needs `--dp-shard-size=1` on multiple GPUs so the ranks are free for context parallelism (see [Parallelism Arguments](#parallelism-arguments)).
++Use `torchrun --nproc-per-node=N` when launching across multiple GPUs (N > 1). By default the model weights are sharded (FSDP) across all N GPUs. The `throughput` preset runs that single sharded replica over a batch; the `latency` preset overlays context and CFG parallelism on that FSDP mesh (see [Parallelism Arguments](#parallelism-arguments)). Do not add `--dp-shard-size=1` merely for multi-GPU latency: it disables weight sharding and can make large models fail during initialization.
+ 
+ #### Cosmos3-Nano
+ 
+@@ -125,6 +125,21 @@ torchrun --nproc-per-node=8 -m cosmos_framework.scripts.inference \
+ 
+ The four `--{dp,cp,cfgp}-*-size` flags override the auto-selected values from `--parallelism-preset`. Super supports `text2image`, `text2video`, and `image2video` (see [Models](#models)).
+ 
++**8 GPUs, latency:**
++
++```shell
++torchrun --nproc-per-node=8 -m cosmos_framework.scripts.inference \
++    --parallelism-preset=latency \
++    --dp-shard-size=8 --dp-replicate-size=1 \
++    --cp-size=4 --cfgp-size=2 \
++    -i "inputs/omni/*.json" \
++    -o outputs/omni_super_latency \
++    --checkpoint-path Cosmos3-Super \
++    --seed=0
++```
++
++This keeps the Super weights FSDP-sharded over every rank while using the latency overlay. The exact usable request shape still depends on activation and auxiliary-model memory.
++
+ ## Models
+ 
+ | Model         | Arguments                         | Modes                                          |
+@@ -153,7 +168,7 @@ Set `enable_sound: true` on a `text2video` sample (see [`inputs/omni/t2vs.json`]
+ By default the model weights are sharded (FSDP) across **all** visible GPUs (`dp_shard_size = WORLD_SIZE`, `dp_replicate_size = 1`), so any model fits regardless of size. Override any axis with the `--dp-shard-size` / `--dp-replicate-size` / `--cp-size` / `--cfgp-size` flags.
+ 
+ - `--parallelism-preset`
+-  - `latency`: Minimize wall-clock per sample by splitting each sample across GPUs with **context parallelism**. On multiple GPUs, also pass `--dp-shard-size=1` so the ranks are used for context/CFG parallelism instead of weight sharding. Used for real-time jobs.
++  - `latency`: Minimize wall-clock per sample by splitting each sample across GPUs with **context parallelism**. On multiple GPUs, the default FSDP shard remains active and CP/CFGP are overlay meshes. Do not set `--dp-shard-size=1` unless the complete model intentionally fits on every individual GPU and replicated weights are desired.
+   - `throughput`: No context parallelism (`cp=cfgp=1`); the model is sharded across all GPUs and a single replica processes the batch. Used for batch jobs.
+ - `--dp-shard-size`: Number of ranks the model is sharded over (FSDP). Defaults to all ranks (`WORLD_SIZE`).
+ - `--max-num-seqs`: Maximum number of samples batched together per replica.
+diff --git a/examples/inference_py310_compat/sitecustomize.py b/examples/inference_py310_compat/sitecustomize.py
+new file mode 100644
+index 0000000..0ed42a0
+--- /dev/null
++++ b/examples/inference_py310_compat/sitecustomize.py
+@@ -0,0 +1,33 @@
++"""Small Python 3.10 shim for the official Cosmos inference entrypoint.
++
++The framework declares Python >=3.10 but uses ``contextlib.chdir``, which was
++added in Python 3.11.  This module is placed first on PYTHONPATH by the
++inference launchers; the framework source remains unchanged.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import os
++import sys
++
++
++# Keep optional inference packages behind the environment's site-packages. This
++# supplies missing modules without shadowing compatible global dependencies.
++optional_pydeps = os.environ.get("COSMOS_OPTIONAL_PYDEPS")
++if optional_pydeps and os.path.isdir(optional_pydeps) and optional_pydeps not in sys.path:
++    sys.path.append(optional_pydeps)
++
++
++if not hasattr(contextlib, "chdir"):
++
++    @contextlib.contextmanager
++    def chdir(path: str | os.PathLike[str]):
++        old_cwd = os.getcwd()
++        os.chdir(path)
++        try:
++            yield
++        finally:
++            os.chdir(old_cwd)
++
++    contextlib.chdir = chdir  # type: ignore[attr-defined]
+diff --git a/examples/launch_inference_generator_vision_nano_hcu.sh b/examples/launch_inference_generator_vision_nano_hcu.sh
+new file mode 100644
+index 0000000..adc5f77
+--- /dev/null
++++ b/examples/launch_inference_generator_vision_nano_hcu.sh
+@@ -0,0 +1,185 @@
++#!/usr/bin/env bash
++# HCU wrapper around the official Cosmos Framework Generator inference CLI.
++# Defaults are a one-image smoke. ``official-t2v`` preserves the Framework
++# runtime defaults for a full official T2V request; paths remain local overrides.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++WORKDIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
++cd "$WORKDIR"
++
++: "${HIP_VISIBLE_DEVICES:=0}"
++: "${MASTER_PORT:=29730}"
++: "${INFERENCE_PROFILE:=smoke}"
++case "$INFERENCE_PROFILE" in
++    smoke)
++        DEFAULT_INPUT_FILE=inputs/omni/t2i.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_hcu_smoke
++        DEFAULT_PARALLELISM_PRESET=latency
++        DEFAULT_RESOLUTION=256
++        DEFAULT_NUM_FRAMES=1
++        DEFAULT_GUARDRAILS=false
++        ;;
++    quality-t2v)
++        DEFAULT_INPUT_FILE=inputs/omni/t2v.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_hcu_quality_t2v
++        DEFAULT_PARALLELISM_PRESET=throughput
++        DEFAULT_RESOLUTION=720
++        DEFAULT_NUM_FRAMES=189
++        DEFAULT_GUARDRAILS=false
++        ;;
++    official-t2v)
++        DEFAULT_INPUT_FILE=inputs/omni/t2v.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_hcu_official_t2v
++        DEFAULT_PARALLELISM_PRESET=latency
++        DEFAULT_RESOLUTION=720
++        DEFAULT_NUM_FRAMES=189
++        DEFAULT_GUARDRAILS=true
++        ;;
++    official-i2v)
++        DEFAULT_INPUT_FILE=inputs/omni/i2v_local_hcu.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_hcu_official_i2v
++        DEFAULT_PARALLELISM_PRESET=latency
++        DEFAULT_RESOLUTION=720
++        DEFAULT_NUM_FRAMES=189
++        DEFAULT_GUARDRAILS=true
++        ;;
++    *)
++        echo "ERROR: INFERENCE_PROFILE must be smoke, quality-t2v, official-t2v, or official-i2v: $INFERENCE_PROFILE" >&2
++        exit 2
++        ;;
++esac
++: "${INPUT_FILE:=$DEFAULT_INPUT_FILE}"
++: "${OUTPUT_DIR:=$DEFAULT_OUTPUT_DIR}"
++: "${CHECKPOINT_PATH:=/data/Cosmos/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/data/Cosmos/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Nano}"
++: "${HCU_PYDEPS_DIR:=/data/Cosmos/cosmos/.pydeps-hcu}"
++: "${HCU_PYDEPS_ENABLED:=false}"
++: "${PARALLELISM_PRESET:=$DEFAULT_PARALLELISM_PRESET}"
++: "${SEED:=0}"
++: "${RESOLUTION:=$DEFAULT_RESOLUTION}"
++: "${NUM_FRAMES:=$DEFAULT_NUM_FRAMES}"
++: "${GUARDRAILS:=$DEFAULT_GUARDRAILS}"
++: "${BENCHMARK:=true}"
++: "${HF_HUB_OFFLINE:=1}"
++: "${LOG_FILE:=${OUTPUT_DIR%/}/inference.log}"
++: "${LOCAL_ASSET_LAUNCHER:=$WORKDIR/tools/run_framework_inference_local_assets.py}"
++
++HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$HIP_VISIBLE_DEVICES" || "$HIP_VISIBLE_DEVICES" == ,* || "$HIP_VISIBLE_DEVICES" == *, || "$HIP_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: HIP_VISIBLE_DEVICES must be a comma-separated list: $HIP_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a HCU_DEVICE_IDS <<< "$HIP_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#HCU_DEVICE_IDS[@]}
++
++[[ -f "$INPUT_FILE" ]] || { echo "ERROR: input file not found: $INPUT_FILE" >&2; exit 1; }
++[[ -f "$WAN_VAE_PATH" ]] || { echo "ERROR: VAE file not found: $WAN_VAE_PATH" >&2; exit 1; }
++[[ -d "$PROCESSOR_DIR" ]] || { echo "ERROR: processor directory not found: $PROCESSOR_DIR" >&2; exit 1; }
++if [[ -d "$CHECKPOINT_PATH/model" ]]; then
++    compgen -G "$CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $CHECKPOINT_PATH/model" >&2; exit 1; }
++elif compgen -G "$CHECKPOINT_PATH/*.distcp" >/dev/null; then
++    :
++elif [[ -f "$CHECKPOINT_PATH/config.json" ]]; then
++    :
++else
++    echo "ERROR: checkpoint must be a local DCP directory or a local HF directory with config.json: $CHECKPOINT_PATH" >&2
++    exit 1
++fi
++OFFLINE_MODE=false
++case "${HF_HUB_OFFLINE,,}" in
++    1|true|yes) OFFLINE_MODE=true ;;
++esac
++if [[ "$GUARDRAILS" == "true" && "$OFFLINE_MODE" == "true" ]]; then
++    QWEN3GUARD_LOCAL_PATH="${COSMOS_QWEN3GUARD_PATH:-${COSMOS_HCU_QWEN3GUARD_DIR:-}}"
++    [[ -n "${COSMOS_GUARDRAIL1_PATH:-}" ]] || {
++        echo "ERROR: GUARDRAILS=true with HF_HUB_OFFLINE=$HF_HUB_OFFLINE requires COSMOS_GUARDRAIL1_PATH" >&2
++        exit 2
++    }
++    [[ -d "$COSMOS_GUARDRAIL1_PATH" ]] || {
++        echo "ERROR: COSMOS_GUARDRAIL1_PATH is not a directory: $COSMOS_GUARDRAIL1_PATH" >&2
++        exit 2
++    }
++    [[ -n "$QWEN3GUARD_LOCAL_PATH" ]] || {
++        echo "ERROR: GUARDRAILS=true with HF_HUB_OFFLINE=$HF_HUB_OFFLINE requires COSMOS_QWEN3GUARD_PATH" >&2
++        exit 2
++    }
++    [[ -d "$QWEN3GUARD_LOCAL_PATH" ]] || {
++        echo "ERROR: COSMOS_QWEN3GUARD_PATH is not a directory: $QWEN3GUARD_LOCAL_PATH" >&2
++        exit 2
++    }
++fi
++export COSMOS_TRAINING="${COSMOS_TRAINING:-false}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export HIP_VISIBLE_DEVICES
++export WAN_VAE_PATH PROCESSOR_DIR
++if [[ -z "${COSMOS_SMOKE+x}" ]]; then
++    if [[ "$INFERENCE_PROFILE" == "smoke" ]]; then COSMOS_SMOKE=1; else COSMOS_SMOKE=0; fi
++fi
++export COSMOS_SMOKE
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++# Current HCU PyTorch accepts the canonical allocator variable.  Preserve a
++# caller's deprecated setting as an input, but do not export it to avoid the
++# runtime deprecation warning.
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}}"
++unset PYTORCH_CUDA_ALLOC_CONF
++# Keep the container's tested Transformers/huggingface_hub pair ahead of the
++# optional HCU overlay.  The overlay remains available for packages absent
++# from the base image without forcing its incompatible Transformers build.
++export PYTHONPATH="$WORKDIR/examples/inference_py310_compat:$WORKDIR${PYTHONPATH:+:$PYTHONPATH}"
++if [[ "${HCU_PYDEPS_ENABLED,,}" == "true" ]]; then
++    export COSMOS_OPTIONAL_PYDEPS="$HCU_PYDEPS_DIR"
++    export PYTHONPATH="$PYTHONPATH:$HCU_PYDEPS_DIR"
++else
++    unset COSMOS_OPTIONAL_PYDEPS
++fi
++if [[ "$GUARDRAILS" == "true" ]]; then
++    if ! python -c 'import better_profanity, nltk, sentencepiece, google.protobuf; from retinaface.data import cfg_re50'; then
++        echo "ERROR: GUARDRAILS=true requires the Framework guardrail Python extras in the interpreter used by torchrun: better-profanity, nltk, protobuf, retinaface-py, sentencepiece. retinaface-py does not require TensorFlow." >&2
++        exit 2
++    fi
++fi
++
++INFERENCE_ARGS=(
++    -i "$INPUT_FILE"
++    -o "$OUTPUT_DIR"
++    --checkpoint-path "$CHECKPOINT_PATH"
++    --parallelism-preset="$PARALLELISM_PRESET"
++    --seed="$SEED"
++    --resolution="$RESOLUTION"
++    --num-frames="$NUM_FRAMES"
++)
++if [[ "$GUARDRAILS" == "true" ]]; then INFERENCE_ARGS+=(--guardrails); else INFERENCE_ARGS+=(--no-guardrails); fi
++# Leave FSDP sharding to the official Omni planner.  In the current Framework,
++# latency CP/CFGP are overlay meshes and must not force a replicated dp=1
++# model on every HCU.
++[[ "$BENCHMARK" == "true" ]] && INFERENCE_ARGS+=(--benchmark)
++INFERENCE_ARGS+=("$@")
++
++[[ -f "$LOCAL_ASSET_LAUNCHER" ]] || { echo "ERROR: local asset launcher not found: $LOCAL_ASSET_LAUNCHER" >&2; exit 1; }
++INFERENCE_ENTRY=("$LOCAL_ASSET_LAUNCHER")
++
++mkdir -p "$(dirname -- "$LOG_FILE")"
++echo ">>> workdir: $WORKDIR"
++echo ">>> HCU devices: $HIP_VISIBLE_DEVICES"
++echo ">>> profile: $INFERENCE_PROFILE"
++echo ">>> parallelism: $PARALLELISM_PRESET"
++echo ">>> guardrails: $GUARDRAILS | torch_compile: official CLI default | weights: regular checkpoint"
++echo ">>> HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
++echo ">>> local asset shim: $LOCAL_ASSET_LAUNCHER"
++[[ -n "${COSMOS_GUARDRAIL1_PATH:-}" ]] && echo ">>> Guardrail1 path: $COSMOS_GUARDRAIL1_PATH"
++[[ -n "${COSMOS_QWEN3GUARD_PATH:-}" ]] && echo ">>> Qwen3Guard path: $COSMOS_QWEN3GUARD_PATH"
++echo ">>> checkpoint: $CHECKPOINT_PATH"
++echo ">>> input: $INPUT_FILE"
++echo ">>> output: $OUTPUT_DIR"
++echo ">>> log: $LOG_FILE"
++
++set +e
++torchrun --nproc_per_node="$NPROC_PER_NODE" --master_port="$MASTER_PORT" "${INFERENCE_ENTRY[@]}" "${INFERENCE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
++EXIT_CODE=${PIPESTATUS[0]}
++set -e
++echo ">>> inference exit: $EXIT_CODE"
++exit "$EXIT_CODE"
+diff --git a/examples/launch_inference_generator_vision_nano_nvidia_local.sh b/examples/launch_inference_generator_vision_nano_nvidia_local.sh
+new file mode 100644
+index 0000000..00c5967
+--- /dev/null
++++ b/examples/launch_inference_generator_vision_nano_nvidia_local.sh
+@@ -0,0 +1,177 @@
++#!/usr/bin/env bash
++# NVIDIA local wrapper around the official Cosmos Framework Generator inference CLI.
++# Defaults are a one-image smoke. ``official-t2v`` preserves the Framework
++# runtime defaults for a full official T2V request; paths remain local overrides.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++WORKDIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
++cd "$WORKDIR"
++
++: "${CUDA_VISIBLE_DEVICES:=0}"
++: "${MASTER_PORT:=30730}"
++: "${INFERENCE_PROFILE:=smoke}"
++case "$INFERENCE_PROFILE" in
++    smoke)
++        DEFAULT_INPUT_FILE=inputs/omni/t2i.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_nvidia_smoke
++        DEFAULT_PARALLELISM_PRESET=latency
++        DEFAULT_RESOLUTION=256
++        DEFAULT_NUM_FRAMES=1
++        DEFAULT_GUARDRAILS=false
++        ;;
++    quality-t2v)
++        DEFAULT_INPUT_FILE=inputs/omni/t2v.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_nvidia_quality_t2v
++        DEFAULT_PARALLELISM_PRESET=throughput
++        DEFAULT_RESOLUTION=720
++        DEFAULT_NUM_FRAMES=189
++        DEFAULT_GUARDRAILS=false
++        ;;
++    official-t2v)
++        DEFAULT_INPUT_FILE=inputs/omni/t2v.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_nvidia_official_t2v
++        DEFAULT_PARALLELISM_PRESET=latency
++        DEFAULT_RESOLUTION=720
++        DEFAULT_NUM_FRAMES=189
++        DEFAULT_GUARDRAILS=true
++        ;;
++    official-i2v)
++        DEFAULT_INPUT_FILE=inputs/omni/i2v_local_nvidia.json
++        DEFAULT_OUTPUT_DIR=outputs/inference_generator_vision_nano_nvidia_official_i2v
++        DEFAULT_PARALLELISM_PRESET=latency
++        DEFAULT_RESOLUTION=720
++        DEFAULT_NUM_FRAMES=189
++        DEFAULT_GUARDRAILS=true
++        ;;
++    *)
++        echo "ERROR: INFERENCE_PROFILE must be smoke, quality-t2v, official-t2v, or official-i2v: $INFERENCE_PROFILE" >&2
++        exit 2
++        ;;
++esac
++: "${INPUT_FILE:=$DEFAULT_INPUT_FILE}"
++: "${OUTPUT_DIR:=$DEFAULT_OUTPUT_DIR}"
++: "${CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/Cosmos3-Nano-DCP}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${PROCESSOR_DIR:=/public/opendas/DL_DATA/llm-models/Cosmos3/Cosmos-3-Nano}"
++: "${PARALLELISM_PRESET:=$DEFAULT_PARALLELISM_PRESET}"
++: "${SEED:=0}"
++: "${RESOLUTION:=$DEFAULT_RESOLUTION}"
++: "${NUM_FRAMES:=$DEFAULT_NUM_FRAMES}"
++: "${GUARDRAILS:=$DEFAULT_GUARDRAILS}"
++: "${BENCHMARK:=true}"
++: "${HF_HUB_OFFLINE:=1}"
++: "${LOG_FILE:=${OUTPUT_DIR%/}/inference.log}"
++: "${LOCAL_ASSET_LAUNCHER:=$WORKDIR/tools/run_framework_inference_local_assets.py}"
++
++CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
++if [[ -z "$CUDA_VISIBLE_DEVICES" || "$CUDA_VISIBLE_DEVICES" == ,* || "$CUDA_VISIBLE_DEVICES" == *, || "$CUDA_VISIBLE_DEVICES" == *,,* ]]; then
++    echo "ERROR: CUDA_VISIBLE_DEVICES must be a comma-separated list: $CUDA_VISIBLE_DEVICES" >&2
++    exit 2
++fi
++IFS=',' read -r -a NVIDIA_DEVICE_IDS <<< "$CUDA_VISIBLE_DEVICES"
++NPROC_PER_NODE=${#NVIDIA_DEVICE_IDS[@]}
++
++[[ -f "$INPUT_FILE" ]] || { echo "ERROR: input file not found: $INPUT_FILE" >&2; exit 1; }
++[[ -f "$WAN_VAE_PATH" ]] || { echo "ERROR: VAE file not found: $WAN_VAE_PATH" >&2; exit 1; }
++[[ -d "$PROCESSOR_DIR" ]] || { echo "ERROR: processor directory not found: $PROCESSOR_DIR" >&2; exit 1; }
++if [[ -d "$CHECKPOINT_PATH/model" ]]; then
++    compgen -G "$CHECKPOINT_PATH/model/*.distcp" >/dev/null || { echo "ERROR: no DCP shards under $CHECKPOINT_PATH/model" >&2; exit 1; }
++elif compgen -G "$CHECKPOINT_PATH/*.distcp" >/dev/null; then
++    :
++elif [[ -f "$CHECKPOINT_PATH/config.json" ]]; then
++    :
++else
++    echo "ERROR: checkpoint must be a local DCP directory or a local HF directory with config.json: $CHECKPOINT_PATH" >&2
++    exit 1
++fi
++OFFLINE_MODE=false
++case "${HF_HUB_OFFLINE,,}" in
++    1|true|yes) OFFLINE_MODE=true ;;
++esac
++if [[ "$GUARDRAILS" == "true" && "$OFFLINE_MODE" == "true" ]]; then
++    QWEN3GUARD_LOCAL_PATH="${COSMOS_QWEN3GUARD_PATH:-${COSMOS_HCU_QWEN3GUARD_DIR:-}}"
++    [[ -n "${COSMOS_GUARDRAIL1_PATH:-}" ]] || {
++        echo "ERROR: GUARDRAILS=true with HF_HUB_OFFLINE=$HF_HUB_OFFLINE requires COSMOS_GUARDRAIL1_PATH" >&2
++        exit 2
++    }
++    [[ -d "$COSMOS_GUARDRAIL1_PATH" ]] || {
++        echo "ERROR: COSMOS_GUARDRAIL1_PATH is not a directory: $COSMOS_GUARDRAIL1_PATH" >&2
++        exit 2
++    }
++    [[ -n "$QWEN3GUARD_LOCAL_PATH" ]] || {
++        echo "ERROR: GUARDRAILS=true with HF_HUB_OFFLINE=$HF_HUB_OFFLINE requires COSMOS_QWEN3GUARD_PATH" >&2
++        exit 2
++    }
++    [[ -d "$QWEN3GUARD_LOCAL_PATH" ]] || {
++        echo "ERROR: COSMOS_QWEN3GUARD_PATH is not a directory: $QWEN3GUARD_LOCAL_PATH" >&2
++        exit 2
++    }
++fi
++export COSMOS_TRAINING="${COSMOS_TRAINING:-false}"
++export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
++export CUDA_VISIBLE_DEVICES
++export WAN_VAE_PATH PROCESSOR_DIR
++if [[ -z "${COSMOS_SMOKE+x}" ]]; then
++    if [[ "$INFERENCE_PROFILE" == "smoke" ]]; then COSMOS_SMOKE=1; else COSMOS_SMOKE=0; fi
++fi
++export COSMOS_SMOKE
++export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
++export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
++# Prefer the current PyTorch allocator variable while accepting a caller's
++# deprecated spelling as input for this process.
++export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}}"
++unset PYTORCH_CUDA_ALLOC_CONF
++export PYTHONPATH="$WORKDIR/examples/inference_py310_compat:$WORKDIR${PYTHONPATH:+:$PYTHONPATH}"
++if [[ -n "${NVIDIA_LD_LIBRARY_PATH:-}" ]]; then
++    export LD_LIBRARY_PATH="$NVIDIA_LD_LIBRARY_PATH"
++fi
++if [[ "$GUARDRAILS" == "true" ]]; then
++    if ! python -c 'import better_profanity, nltk, sentencepiece, google.protobuf; from retinaface.data import cfg_re50'; then
++        echo "ERROR: GUARDRAILS=true requires the Framework guardrail Python extras in the interpreter used by torchrun: better-profanity, nltk, protobuf, retinaface-py, sentencepiece. retinaface-py does not require TensorFlow." >&2
++        exit 2
++    fi
++fi
++
++INFERENCE_ARGS=(
++    -i "$INPUT_FILE"
++    -o "$OUTPUT_DIR"
++    --checkpoint-path "$CHECKPOINT_PATH"
++    --parallelism-preset="$PARALLELISM_PRESET"
++    --seed="$SEED"
++    --resolution="$RESOLUTION"
++    --num-frames="$NUM_FRAMES"
++)
++if [[ "$GUARDRAILS" == "true" ]]; then INFERENCE_ARGS+=(--guardrails); else INFERENCE_ARGS+=(--no-guardrails); fi
++# Keep the official Omni parallelism planner in control.  In current Framework
++# builds, FSDP sharding and CP/CFGP are overlay meshes: a multi-GPU latency run
++# must retain its default dp_shard_size=WORLD_SIZE instead of replicating the
++# model with an explicit dp_shard_size=1.
++[[ "$BENCHMARK" == "true" ]] && INFERENCE_ARGS+=(--benchmark)
++INFERENCE_ARGS+=("$@")
++
++[[ -f "$LOCAL_ASSET_LAUNCHER" ]] || { echo "ERROR: local asset launcher not found: $LOCAL_ASSET_LAUNCHER" >&2; exit 1; }
++INFERENCE_ENTRY=("$LOCAL_ASSET_LAUNCHER")
++
++mkdir -p "$(dirname -- "$LOG_FILE")"
++echo ">>> workdir: $WORKDIR"
++echo ">>> NVIDIA devices: $CUDA_VISIBLE_DEVICES"
++echo ">>> profile: $INFERENCE_PROFILE"
++echo ">>> parallelism: $PARALLELISM_PRESET"
++echo ">>> guardrails: $GUARDRAILS | torch_compile: official CLI default | weights: regular checkpoint"
++echo ">>> HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
++echo ">>> local asset shim: $LOCAL_ASSET_LAUNCHER"
++[[ -n "${COSMOS_GUARDRAIL1_PATH:-}" ]] && echo ">>> Guardrail1 path: $COSMOS_GUARDRAIL1_PATH"
++[[ -n "${COSMOS_QWEN3GUARD_PATH:-}" ]] && echo ">>> Qwen3Guard path: $COSMOS_QWEN3GUARD_PATH"
++echo ">>> checkpoint: $CHECKPOINT_PATH"
++echo ">>> input: $INPUT_FILE"
++echo ">>> output: $OUTPUT_DIR"
++echo ">>> log: $LOG_FILE"
++
++set +e
++torchrun --nproc_per_node="$NPROC_PER_NODE" --master_port="$MASTER_PORT" "${INFERENCE_ENTRY[@]}" "${INFERENCE_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
++EXIT_CODE=${PIPESTATUS[0]}
++set -e
++echo ">>> inference exit: $EXIT_CODE"
++exit "$EXIT_CODE"
+diff --git a/examples/launch_inference_generator_vision_super_hcu.sh b/examples/launch_inference_generator_vision_super_hcu.sh
+new file mode 100644
+index 0000000..762ed9c
+--- /dev/null
++++ b/examples/launch_inference_generator_vision_super_hcu.sh
+@@ -0,0 +1,42 @@
++#!/usr/bin/env bash
++# HCU wrapper for the official Generator Super Framework inference CLI.
++# Resource resolution and inference logic are delegated to the Nano wrapper;
++# only the model/processor defaults differ.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++: "${INFERENCE_PROFILE:=smoke}"
++case "$INFERENCE_PROFILE" in
++    smoke)
++        : "${INPUT_FILE:=inputs/omni/t2i.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_hcu_smoke}"
++        ;;
++    quality-t2v)
++        : "${INPUT_FILE:=inputs/omni/t2v.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_hcu_quality_t2v}"
++        ;;
++    official-t2v)
++        : "${INPUT_FILE:=inputs/omni/t2v.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_hcu_official_t2v}"
++        ;;
++    official-i2v)
++        : "${INPUT_FILE:=inputs/omni/i2v_local_hcu.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_hcu_official_i2v}"
++        # The converted Super DCP intentionally omits the visual tower.  I2V
++        # therefore defaults to the local HF checkpoint that includes it.
++        : "${CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Super}"
++        ;;
++    *)
++        echo "ERROR: INFERENCE_PROFILE must be smoke, quality-t2v, official-t2v, or official-i2v: $INFERENCE_PROFILE" >&2
++        exit 2
++        ;;
++esac
++
++: "${CHECKPOINT_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Super-DCP}"
++: "${PROCESSOR_DIR:=/public4/opendas/DL_DATA/llm-models/Cosmos3/Cosmos3-Super}"
++: "${WAN_VAE_PATH:=/public4/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${COSMOS_SMOKE:=$([[ "$INFERENCE_PROFILE" == smoke ]] && echo 1 || echo 0)}"
++
++export INFERENCE_PROFILE INPUT_FILE OUTPUT_DIR CHECKPOINT_PATH PROCESSOR_DIR WAN_VAE_PATH COSMOS_SMOKE
++exec bash "$SCRIPT_DIR/launch_inference_generator_vision_nano_hcu.sh" "$@"
+diff --git a/examples/launch_inference_generator_vision_super_nvidia_local.sh b/examples/launch_inference_generator_vision_super_nvidia_local.sh
+new file mode 100644
+index 0000000..0eda6a2
+--- /dev/null
++++ b/examples/launch_inference_generator_vision_super_nvidia_local.sh
+@@ -0,0 +1,39 @@
++#!/usr/bin/env bash
++# NVIDIA local wrapper for the official Generator Super Framework inference CLI.
++# Resource resolution and inference logic are delegated to the Nano wrapper;
++# only the model/processor defaults differ.
++
++set -euo pipefail
++
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++: "${INFERENCE_PROFILE:=smoke}"
++case "$INFERENCE_PROFILE" in
++    smoke)
++        : "${INPUT_FILE:=inputs/omni/t2i.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_nvidia_smoke}"
++        ;;
++    quality-t2v)
++        : "${INPUT_FILE:=inputs/omni/t2v.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_nvidia_quality_t2v}"
++        ;;
++    official-t2v)
++        : "${INPUT_FILE:=inputs/omni/t2v.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_nvidia_official_t2v}"
++        ;;
++    official-i2v)
++        : "${INPUT_FILE:=inputs/omni/i2v_local_nvidia.json}"
++        : "${OUTPUT_DIR:=outputs/inference_generator_vision_super_nvidia_official_i2v}"
++        ;;
++    *)
++        echo "ERROR: INFERENCE_PROFILE must be smoke, quality-t2v, official-t2v, or official-i2v: $INFERENCE_PROFILE" >&2
++        exit 2
++        ;;
++esac
++
++: "${CHECKPOINT_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/Cosmos-3-Super}"
++: "${PROCESSOR_DIR:=/public/opendas/DL_DATA/llm-models/Cosmos3/Cosmos-3-Super}"
++: "${WAN_VAE_PATH:=/public/opendas/DL_DATA/llm-models/Cosmos3/checkpoints/wan22_vae/Wan2.2_VAE.pth}"
++: "${COSMOS_SMOKE:=$([[ "$INFERENCE_PROFILE" == smoke ]] && echo 1 || echo 0)}"
++
++export INFERENCE_PROFILE INPUT_FILE OUTPUT_DIR CHECKPOINT_PATH PROCESSOR_DIR WAN_VAE_PATH COSMOS_SMOKE
++exec bash "$SCRIPT_DIR/launch_inference_generator_vision_nano_nvidia_local.sh" "$@"
+diff --git a/inputs/omni/i2v_local_hcu.json b/inputs/omni/i2v_local_hcu.json
+new file mode 100644
+index 0000000..2f72b7f
+--- /dev/null
++++ b/inputs/omni/i2v_local_hcu.json
+@@ -0,0 +1,6 @@
++{
++  "model_mode": "image2video",
++  "name": "i2v_local_hcu",
++  "prompt": "A silver car drives smoothly along a winding coastal road. The camera follows the car as sunlight glints on the body, with green hills and blue water in the background.",
++  "vision_path": "/data/Cosmos/cosmos/cookbooks/cosmos3/generator/audiovisual/assets/images/image2video/car_driving.jpg"
++}
+diff --git a/inputs/omni/i2v_local_nvidia.json b/inputs/omni/i2v_local_nvidia.json
+new file mode 100644
+index 0000000..f448a13
+--- /dev/null
++++ b/inputs/omni/i2v_local_nvidia.json
+@@ -0,0 +1,6 @@
++{
++  "model_mode": "image2video",
++  "name": "i2v_local_nvidia",
++  "prompt": "A silver car drives smoothly along a winding coastal road. The camera follows the car as sunlight glints on the body, with green hills and blue water in the background.",
++  "vision_path": "/data/cosmos/cookbooks/cosmos3/generator/audiovisual/assets/images/image2video/car_driving.jpg"
++}
+diff --git a/tests/local_inference_launcher_test.py b/tests/local_inference_launcher_test.py
+new file mode 100644
+index 0000000..819bf28
+--- /dev/null
++++ b/tests/local_inference_launcher_test.py
+@@ -0,0 +1,206 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: OpenMDW-1.1
++
++"""Contract tests for the local Generator inference launchers.
++
++These tests replace ``torchrun`` with a tiny executable that records argv, so
++they validate wrapper behavior without loading a model or requiring GPUs.
++"""
++
++from __future__ import annotations
++
++import os
++import shutil
++import subprocess
++from dataclasses import dataclass
++from pathlib import Path
++
++import pytest
++
++
++@dataclass(frozen=True)
++class LauncherSpec:
++    name: str
++    nano_wrapper: str
++    super_wrapper: str
++    visible_devices_var: str
++    i2v_input: str
++
++
++LAUNCHERS = (
++    LauncherSpec(
++        name="hcu",
++        nano_wrapper="launch_inference_generator_vision_nano_hcu.sh",
++        super_wrapper="launch_inference_generator_vision_super_hcu.sh",
++        visible_devices_var="HIP_VISIBLE_DEVICES",
++        i2v_input="inputs/omni/i2v_local_hcu.json",
++    ),
++    LauncherSpec(
++        name="h20",
++        nano_wrapper="launch_inference_generator_vision_nano_nvidia_local.sh",
++        super_wrapper="launch_inference_generator_vision_super_nvidia_local.sh",
++        visible_devices_var="CUDA_VISIBLE_DEVICES",
++        i2v_input="inputs/omni/i2v_local_nvidia.json",
++    ),
++)
++
++
++def _make_fake_runtime(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
++    fake_bin = tmp_path / "bin"
++    fake_bin.mkdir()
++    captured_args = tmp_path / "torchrun_args.txt"
++    fake_torchrun = fake_bin / "torchrun"
++    fake_torchrun.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURED_TORCHRUN_ARGS"\n')
++    fake_torchrun.chmod(0o755)
++
++    input_file = tmp_path / "t2v.json"
++    input_file.write_text("{}")
++    checkpoint_dir = tmp_path / "checkpoint"
++    checkpoint_dir.mkdir()
++    (checkpoint_dir / "config.json").write_text("{}")
++    processor_dir = tmp_path / "processor"
++    processor_dir.mkdir()
++    vae_path = tmp_path / "wan_vae.pth"
++    vae_path.touch()
++    local_asset_launcher = tmp_path / "local_assets.py"
++    local_asset_launcher.write_text("# fake launcher\n")
++
++    return fake_bin, captured_args, {
++        "INPUT_FILE": str(input_file),
++        "CHECKPOINT_PATH": str(checkpoint_dir),
++        "PROCESSOR_DIR": str(processor_dir),
++        "WAN_VAE_PATH": str(vae_path),
++        "LOCAL_ASSET_LAUNCHER": str(local_asset_launcher),
++    }
++
++
++def _launcher_env(
++    spec: LauncherSpec,
++    fake_bin: Path,
++    captured_args: Path,
++    assets: dict[str, str],
++    tmp_path: Path,
++    **overrides: str,
++) -> dict[str, str]:
++    env = os.environ | {
++        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
++        "CAPTURED_TORCHRUN_ARGS": str(captured_args),
++        spec.visible_devices_var: "0,1,2,3,4,5,6,7",
++        "MASTER_PORT": "30799",
++        "INFERENCE_PROFILE": "official-t2v",
++        "OUTPUT_DIR": str(tmp_path / "output"),
++        "GUARDRAILS": "false",
++        "BENCHMARK": "false",
++        "HF_HUB_OFFLINE": "1",
++        "COSMOS_SMOKE": "0",
++        **assets,
++    }
++    env.update(overrides)
++    return env
++
++
++def _run_wrapper(wrapper: Path, repo_root: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(
++        ["bash", str(wrapper), *args],
++        cwd=repo_root,
++        env=env,
++        text=True,
++        capture_output=True,
++        check=False,
++    )
++
++
++@pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
++@pytest.mark.parametrize("spec", LAUNCHERS, ids=lambda spec: spec.name)
++def test_multigpu_latency_leaves_dp_sharding_to_framework(tmp_path: Path, spec: LauncherSpec) -> None:
++    """Neither platform wrapper may override the official FSDP auto-plan."""
++    repo_root = Path(__file__).resolve().parents[1]
++    wrapper = repo_root / "examples" / spec.nano_wrapper
++    fake_bin, captured_args, assets = _make_fake_runtime(tmp_path)
++    env = _launcher_env(spec, fake_bin, captured_args, assets, tmp_path)
++
++    result = _run_wrapper(wrapper, repo_root, env, "--warmup=0")
++
++    assert result.returncode == 0, result.stderr
++    args = captured_args.read_text().splitlines()
++    assert "--parallelism-preset=latency" in args
++    assert "--resolution=720" in args
++    assert "--num-frames=189" in args
++    assert "--no-guardrails" in args
++    assert not any(arg.startswith("--dp-shard-size=") for arg in args)
++
++
++@pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
++@pytest.mark.parametrize("spec", LAUNCHERS, ids=lambda spec: spec.name)
++def test_launcher_defaults_to_in_repo_asset_shim(tmp_path: Path, spec: LauncherSpec) -> None:
++    """The committed launcher must not depend on a sibling workspace checkout."""
++    repo_root = Path(__file__).resolve().parents[1]
++    wrapper = repo_root / "examples" / spec.nano_wrapper
++    fake_bin, captured_args, assets = _make_fake_runtime(tmp_path)
++    assets.pop("LOCAL_ASSET_LAUNCHER")
++    env = _launcher_env(spec, fake_bin, captured_args, assets, tmp_path)
++
++    result = _run_wrapper(wrapper, repo_root, env, "--warmup=0")
++
++    assert result.returncode == 0, result.stderr
++    args = captured_args.read_text().splitlines()
++    expected_suffix = f"/{repo_root.name}/tools/run_framework_inference_local_assets.py"
++    assert any(arg.replace("\\", "/").endswith(expected_suffix) for arg in args)
++
++
++@pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
++@pytest.mark.parametrize("spec", LAUNCHERS, ids=lambda spec: spec.name)
++def test_super_i2v_delegates_without_reintroducing_dp_override(tmp_path: Path, spec: LauncherSpec) -> None:
++    """Super selects its platform I2V input and preserves the Nano contract."""
++    repo_root = Path(__file__).resolve().parents[1]
++    wrapper = repo_root / "examples" / spec.super_wrapper
++    fake_bin, captured_args, assets = _make_fake_runtime(tmp_path)
++    assets.pop("INPUT_FILE")
++    env = _launcher_env(
++        spec,
++        fake_bin,
++        captured_args,
++        assets,
++        tmp_path,
++        INFERENCE_PROFILE="official-i2v",
++    )
++
++    result = _run_wrapper(wrapper, repo_root, env, "--warmup=0")
++
++    assert result.returncode == 0, result.stderr
++    args = captured_args.read_text().splitlines()
++    assert args[args.index("-i") + 1] == spec.i2v_input
++    assert "--parallelism-preset=latency" in args
++    assert not any(arg.startswith("--dp-shard-size=") for arg in args)
++
++
++@pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
++@pytest.mark.parametrize("spec", LAUNCHERS, ids=lambda spec: spec.name)
++def test_guardrail_dependency_failure_happens_before_torchrun(tmp_path: Path, spec: LauncherSpec) -> None:
++    """A missing Guardrails extra must fail before distributed model startup."""
++    repo_root = Path(__file__).resolve().parents[1]
++    wrapper = repo_root / "examples" / spec.nano_wrapper
++    fake_bin, captured_args, assets = _make_fake_runtime(tmp_path)
++    fake_python = fake_bin / "python"
++    fake_python.write_text("#!/usr/bin/env bash\nexit 1\n")
++    fake_python.chmod(0o755)
++    guardrail_dir = tmp_path / "guardrail"
++    qwen_dir = tmp_path / "qwen"
++    guardrail_dir.mkdir()
++    qwen_dir.mkdir()
++    env = _launcher_env(
++        spec,
++        fake_bin,
++        captured_args,
++        assets,
++        tmp_path,
++        GUARDRAILS="true",
++        COSMOS_GUARDRAIL1_PATH=str(guardrail_dir),
++        COSMOS_QWEN3GUARD_PATH=str(qwen_dir),
++    )
++
++    result = _run_wrapper(wrapper, repo_root, env)
++
++    assert result.returncode == 2
++    assert "retinaface-py" in result.stderr
++    assert not captured_args.exists()
+diff --git a/tools/run_framework_inference_local_assets.py b/tools/run_framework_inference_local_assets.py
+new file mode 100644
+index 0000000..47ba1b2
+--- /dev/null
++++ b/tools/run_framework_inference_local_assets.py
+@@ -0,0 +1,350 @@
++#!/usr/bin/env python3
++"""Run the official Cosmos Framework inference entrypoint with local Guardrail assets.
++
++Without either path environment variable this is intentionally equivalent to
++``python -m cosmos_framework.scripts.inference``.  When paths are supplied,
++only model-resource resolution is overridden: the official Guardrail presets
++and inference logic remain unchanged.
++
++Environment variables:
++    COSMOS_GUARDRAIL1_PATH: local ``nvidia/Cosmos-Guardrail1`` repository.
++    COSMOS_QWEN3GUARD_PATH: local ``Qwen/Qwen3Guard-Gen-0.6B`` repository.
++    WAN_VAE_PATH: local ``Wan2.2_VAE.pth`` file.
++    PROCESSOR_DIR: local Cosmos3-Nano/Super processor directory.
++
++``COSMOS_HCU_QWEN3GUARD_DIR`` remains accepted as a legacy alias for the
++second variable used by ``tools/run_hcu_framework_inference.py``.
++"""
++from __future__ import annotations
++
++import json
++import os
++import runpy
++import shutil
++import time
++import contextlib
++from pathlib import Path
++
++
++def _local_directory(*names: str) -> Path | None:
++    configured = [(name, os.environ[name]) for name in names if os.environ.get(name)]
++    if not configured:
++        return None
++
++    values = {value for _, value in configured}
++    if len(values) != 1:
++        rendered = ", ".join(f"{name}={value}" for name, value in configured)
++        raise ValueError(f"Conflicting local model paths: {rendered}")
++
++    path = Path(configured[0][1]).expanduser().resolve()
++    if not path.is_dir():
++        raise FileNotFoundError(f"{configured[0][0]} is not a directory: {path}")
++    return path
++
++
++def patch_hcu_python_compat() -> None:
++    """Apply the small Python 3.10/HCU compatibility surface before imports.
++
++    The HCU dependency overlay supplies its own Transformers package while the
++    container may supply a newer system ``huggingface_hub``.  The historical
++    HCU Framework launcher patched this boundary before importing any module
++    that transitively imports Transformers; keep that ordering here too.
++    """
++    if not hasattr(contextlib, "chdir"):
++        @contextlib.contextmanager
++        def chdir(path):
++            old_cwd = os.getcwd()
++            os.chdir(path)
++            try:
++                yield
++            finally:
++                os.chdir(old_cwd)
++
++        contextlib.chdir = chdir  # type: ignore[attr-defined]
++
++    try:
++        import huggingface_hub
++    except ImportError:
++        return
++
++    if not hasattr(huggingface_hub, "is_offline_mode"):
++        def is_offline_mode() -> bool:
++            return os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "ON", "YES", "TRUE"}
++
++        huggingface_hub.is_offline_mode = is_offline_mode  # type: ignore[attr-defined]
++
++
++def _prepare_local_sound_tokenizer(local_sound_tokenizer: Path, materialize) -> Path:
++    """Build a complete legacy AVAE cache from the local HF files.
++
++    ``torchrun`` starts this shim independently in every rank.  Only rank 0
++    writes the shared cache; files are copied through a temporary name and
++    atomically renamed so other ranks never load a partial safetensors file.
++    """
++    legacy_ckpt = local_sound_tokenizer / "avae_48k_noncausal_25hz_64ch.ckpt"
++    legacy_json = local_sound_tokenizer / "avae_48k_noncausal_25hz_64ch.json"
++    if legacy_ckpt.exists() and legacy_json.exists():
++        return local_sound_tokenizer
++
++    cache_dir = Path(__file__).resolve().parents[1] / "outputs" / "hcu_framework" / "sound_tokenizer_legacy"
++    cache_dir.mkdir(parents=True, exist_ok=True)
++    if os.environ.get("RANK", "0") == "0":
++        for name in ("config.json", "diffusion_pytorch_model.safetensors", "model.safetensors"):
++            src = local_sound_tokenizer / name
++            if not src.exists():
++                continue
++            dst = cache_dir / name
++            tmp = cache_dir / f".{name}.tmp"
++            shutil.copyfile(src, tmp)
++            os.replace(tmp, dst)
++        materialize(str(cache_dir))
++    else:
++        deadline = time.monotonic() + 180.0
++        while not (
++            (cache_dir / "avae_48k_noncausal_25hz_64ch.ckpt").exists()
++            and (cache_dir / "avae_48k_noncausal_25hz_64ch.json").exists()
++        ):
++            if time.monotonic() >= deadline:
++                raise TimeoutError(f"Timed out waiting for AVAE cache: {cache_dir}")
++            time.sleep(0.5)
++    return cache_dir
++
++
++def _checkpoint_has_visual_weights() -> bool:
++    """Return whether the selected local checkpoint contains the VLM tower.
++
++    The converted Super DCP used by the HCU training recipe intentionally
++    stores the generation model without ``net.language_model.visual.*``.
++    Nano DCP and the local HF Generator checkpoints do contain those keys.
++    The inference config must match the state-dict shape before DCP loading;
++    otherwise the loader asks for visual projection biases that are not in the
++    converted Super checkpoint.
++    """
++    value = os.environ.get("CHECKPOINT_PATH") or os.environ.get("COSMOS_CHECKPOINT_PATH")
++    if not value:
++        return True
++
++    checkpoint = Path(value).expanduser()
++    metadata_candidates = (
++        checkpoint / "model" / ".metadata",
++        checkpoint / ".metadata",
++    )
++    for metadata in metadata_candidates:
++        if metadata.is_file():
++            try:
++                return b"net.language_model.visual." in metadata.read_bytes()
++            except OSError:
++                return True
++
++    index_candidates = (
++        checkpoint / "model.safetensors.index.json",
++        checkpoint / "model" / "model.safetensors.index.json",
++    )
++    for index in index_candidates:
++        if not index.is_file():
++            continue
++        try:
++            index_data = json.loads(index.read_text(encoding="utf-8"))
++            weight_map = index_data.get("weight_map", {})
++            if not isinstance(weight_map, dict):
++                return True
++
++            # Standard HF VLM checkpoints expose language_model/model.visual
++            # keys.  Cosmos3 Diffusers checkpoints keep the same tower under
++            # ``vision_encoder/`` and use bare ViT keys (blocks, merger,
++            # patch_embed, ...); the Framework Diffusers load planner maps
++            # those keys to ``language_model.visual.*`` at load time.
++            visual_key_prefixes = (
++                "language_model.visual.",
++                "model.visual.",
++                "visual.",
++                "blocks.",
++                "deepstack_merger_list.",
++                "merger.",
++                "patch_embed.",
++                "pos_embed.",
++            )
++            for key, relative_path in weight_map.items():
++                normalized_path = str(relative_path).replace("\\", "/")
++                if normalized_path.startswith("vision_encoder/"):
++                    return True
++                if str(key).startswith(visual_key_prefixes):
++                    return True
++            return False
++        except (OSError, json.JSONDecodeError, AttributeError):
++            return True
++
++    # A non-indexed local HF directory or an unresolved registry path keeps
++    # the historical visual default; the official resolver will report a
++    # missing asset if the path is not usable.
++    return True
++
++
++def patch_local_generator_assets() -> None:
++    """Route the Generator VAE and VLM processor to explicit local assets.
++
++    The official inference CLI intentionally has no training-only Hydra
++    override surface when ``COSMOS_TRAINING=false``.  Keep the CLI official
++    and patch only the two local resource resolvers that otherwise invoke the
++    checkpoint/Hugging Face download path.
++    """
++    vae_value = os.environ.get("WAN_VAE_PATH") or os.environ.get("COSMOS_HCU_WAN22_VAE")
++    processor_value = os.environ.get("PROCESSOR_DIR") or os.environ.get("COSMOS_HCU_PROCESSOR_DIR")
++
++    local_vae = Path(vae_value).expanduser().resolve() if vae_value else None
++    local_processor = Path(processor_value).expanduser().resolve() if processor_value else None
++    if local_vae is not None and not local_vae.is_file():
++        raise FileNotFoundError(f"WAN_VAE_PATH is not a file: {local_vae}")
++
++    import cosmos_framework.utils.checkpoint_db as checkpoint_db
++    from cosmos_framework.inference.common.checkpoints import _materialize_avae_ckpt
++
++    sound_value = (
++        os.environ.get("SOUND_TOKENIZER_DIR")
++        or os.environ.get("COSMOS_HCU_SOUND_TOKENIZER_DIR")
++        or (str(local_processor / "sound_tokenizer") if local_processor is not None else "")
++    )
++    local_sound_tokenizer = Path(sound_value).expanduser().resolve() if sound_value else None
++    materialized_sound_tokenizer: Path | None = None
++    if local_sound_tokenizer is not None and local_sound_tokenizer.is_dir():
++        legacy_ckpt = local_sound_tokenizer / "avae_48k_noncausal_25hz_64ch.ckpt"
++        legacy_json = local_sound_tokenizer / "avae_48k_noncausal_25hz_64ch.json"
++        if legacy_ckpt.exists() and legacy_json.exists():
++            materialized_sound_tokenizer = local_sound_tokenizer
++        else:
++            materialized_sound_tokenizer = _prepare_local_sound_tokenizer(
++                local_sound_tokenizer,
++                _materialize_avae_ckpt,
++            )
++
++    original_download_checkpoint_v2 = checkpoint_db.download_checkpoint_v2
++
++    def download_checkpoint_v2_local(uri: str, *, check_exists: bool = True) -> str:
++        if local_vae is not None and uri.endswith("pretrained/tokenizers/video/wan2pt2/Wan2.2_VAE.pth"):
++            return str(local_vae)
++        if materialized_sound_tokenizer is not None and uri.endswith("pretrained/tokenizers/audio/avae"):
++            return str(materialized_sound_tokenizer)
++        return original_download_checkpoint_v2(uri, check_exists=check_exists)
++
++    checkpoint_db.download_checkpoint_v2 = download_checkpoint_v2_local
++    if local_vae is not None:
++        print(f">>> Wan VAE local path: {local_vae}", flush=True)
++    if materialized_sound_tokenizer is not None:
++        print(f">>> AVAE local path: {materialized_sound_tokenizer}", flush=True)
++
++    if local_processor is None:
++        return
++
++    if not local_processor.is_dir():
++        raise FileNotFoundError(f"PROCESSOR_DIR is not a directory: {local_processor}")
++
++    import cosmos_framework.data.generator.processors as processors
++
++    original_build_processor = processors.build_processor
++    original_build_processor_lazy = processors.build_processor_lazy
++
++    def build_processor_local(tokenizer_type: str, *args, **kwargs):
++        if not Path(tokenizer_type).is_dir():
++            tokenizer_type = str(local_processor)
++        return original_build_processor(tokenizer_type, *args, **kwargs)
++
++    def build_processor_lazy_local(*args, repository=None, revision=None, subdir="", **kwargs):
++        local_path = local_processor / subdir if subdir else local_processor
++        if local_path.is_dir() and (repository is not None or args):
++            return original_build_processor(str(local_path), **kwargs)
++        return original_build_processor_lazy(*args, repository=repository, revision=revision, subdir=subdir, **kwargs)
++
++    processors.build_processor = build_processor_local
++    processors.build_processor_lazy = build_processor_lazy_local
++
++    # The Generator model config uses this resolver directly for the VLM
++    # tokenizer.  Patching only build_processor is insufficient because the
++    # resolver otherwise downloads Qwen3-VL tokenizer/config files before the
++    # processor builder is reached.
++    import cosmos_framework.configs.base.defaults.reasoner as reasoner_defaults
++
++    original_create_qwen2_tokenizer = reasoner_defaults.create_qwen2_tokenizer_with_download
++
++    def create_qwen2_tokenizer_local(
++        pretrained_model_name: str,
++        config_variant: str,
++        *args,
++        **kwargs,
++    ):
++        from cosmos_framework.data.generator.processors.qwen3vl_processor import Qwen3VLProcessor
++
++        if pretrained_model_name.startswith("Qwen/Qwen3-VL-"):
++            return Qwen3VLProcessor(str(local_processor))
++        return original_create_qwen2_tokenizer(pretrained_model_name, config_variant, *args, **kwargs)
++
++    reasoner_defaults.create_qwen2_tokenizer_with_download = create_qwen2_tokenizer_local
++
++    # Keep the visual branch enabled for checkpoints that actually carry the
++    # VLM tower.  The converted Super DCP is a text-conditioned generation
++    # checkpoint and omits those state-dict keys; matching that shape avoids a
++    # DCP load failure while leaving HF/Nano checkpoints unchanged.
++    original_create_vlm_config = reasoner_defaults.create_vlm_config
++
++    def create_vlm_config_local(base_config, **overrides):
++        overrides.setdefault("include_visual", _checkpoint_has_visual_weights())
++        return original_create_vlm_config(base_config, **overrides)
++
++    reasoner_defaults.create_vlm_config = create_vlm_config_local
++    print(f">>> Generator processor local path: {local_processor}", flush=True)
++
++
++def patch_local_guardrail_assets() -> None:
++    """Route only Guardrail weights to local directories when requested."""
++    guardrail_path = _local_directory("COSMOS_GUARDRAIL1_PATH")
++    qwen3guard_path = _local_directory("COSMOS_QWEN3GUARD_PATH", "COSMOS_HCU_QWEN3GUARD_DIR")
++
++    if guardrail_path is None and qwen3guard_path is None:
++        return
++
++    if guardrail_path is not None:
++        required_paths = (
++            guardrail_path / "blocklist",
++            guardrail_path / "face_blur_filter" / "Resnet50_Final.pth",
++        )
++        missing_paths = [str(path) for path in required_paths if not path.exists()]
++        if missing_paths:
++            raise FileNotFoundError(
++                "COSMOS_GUARDRAIL1_PATH is not a compatible Guardrail1 repository; missing: "
++                + ", ".join(missing_paths)
++            )
++
++        from cosmos_framework.auxiliary.guardrail.common.core import GUARDRAIL1_CHECKPOINT
++
++        # This is the same local-path mechanism used by the existing HCU
++        # compatibility launcher. ``download()`` now returns this directory
++        # and never invokes the Hugging Face CLI.
++        GUARDRAIL1_CHECKPOINT._path = str(guardrail_path)
++        print(f">>> Guardrail1 local path: {guardrail_path}", flush=True)
++
++    if qwen3guard_path is not None:
++        import torch
++        from transformers import AutoModelForCausalLM, AutoTokenizer
++
++        from cosmos_framework.auxiliary.guardrail.qwen3guard import qwen3guard
++
++        def qwen3guard_init_local(self, offload_model_to_cpu: bool = True) -> None:
++            self.offload_model = offload_model_to_cpu
++            self.dtype = torch.bfloat16
++            self.model = AutoModelForCausalLM.from_pretrained(str(qwen3guard_path), local_files_only=True)
++            self.tokenizer = AutoTokenizer.from_pretrained(str(qwen3guard_path), local_files_only=True)
++            device = "cpu" if offload_model_to_cpu else "cuda"
++            self.model = self.model.to(device, dtype=self.dtype).eval()
++
++        qwen3guard.Qwen3Guard.__init__ = qwen3guard_init_local
++        print(f">>> Qwen3Guard local path: {qwen3guard_path}", flush=True)
++
++
++def main() -> None:
++    patch_hcu_python_compat()
++    patch_local_generator_assets()
++    patch_local_guardrail_assets()
++    runpy.run_module("cosmos_framework.scripts.inference", run_name="__main__")
++
++
++if __name__ == "__main__":
++    main()

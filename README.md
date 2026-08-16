@@ -28,6 +28,7 @@
 | 13 | [LingBot-VA-DCU](./具身智能模型优化/lingbot-va-dcu/) | ✅ 性能提升28% |
 | 14 | [LingBot-VLA-DCU](./具身智能模型优化/lingbot-vla-dcu/) | ✅ 性能提升52% |
 | 15 | [Cosmos3-Nano-DCU](./具身智能模型优化/cosmos-framework-dcu/) | ✅ 性能提升22% |
+| 16 | [OpenPI-DCU 训练优化(π0 动作策略)](./具身智能模型优化/openpi-dcu/) | ✅ 性能提升26% |
 
 ---
 

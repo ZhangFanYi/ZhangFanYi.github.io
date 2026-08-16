@@ -1,4 +1,4 @@
-# 项目 02:Qwen3.5-0.8B 训练优化(DeepSpeed ZeRO-0 + Flash Linear Attention)
+# Qwen3.5-0.8B 训练优化(DeepSpeed ZeRO-0 + Flash Linear Attention)
 
 ## 概述
 
@@ -8,7 +8,7 @@
 
 ### 1. ZeRO-1 → ZeRO-0
 
-- 客户原配置 ZeRO-1(切分优化器状态),每张卡需在优化器更新时做额外 All-Gather,带来不必要的通信开销
+- 客户原配置 ZeRO-1(切分优化器状态) 每张卡需在优化器更新时做额外 All-Gather 带来不必要的通信开销
 - 模型 0.8B 单卡可完全放下,切分没有收益,**反推 ZeRO-0(什么都不切,所有卡保留完整参数)** 反而最优
 - ZeRO-0 价值:自动计算全局 batch size、梯度裁剪、优化器融合、学习率调度集成,适合小模型高效训练
 - 进一步优化点:torch 原生 AdamW 在 CPU 上更新,可换 `fused_AdamW`(DCU 上完成),但 trace 显示优化器占比不大,收益有限
@@ -34,6 +34,3 @@
 - [code/demo_code](./code/demo_code/):1 条数据验证 Qwen3.5-0.8B VLM SFT 训练流程的最小 demo(含 ds_config ZeRO-0 配置)
 - [code/train.py](./code/train.py):训练主脚本(accelerate + DeepSpeed 封装)
 
-## 文档
-
-- [Qwen3.5-0.8B训练.pdf](./Qwen3.5-0.8B训练.pdf)(原始报告)

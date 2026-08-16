@@ -1,8 +1,8 @@
-# 项目 16: OpenPI-DCU 训练优化(π0 动作策略)
+# OpenPI-DCU 训练优化
 
 ## 概述
 
-客户基于 **DeepSpeed-Z2** 训练 **OpenPI(π0 动作策略)**。一开始在单卡上跑,显存占用 98% 难以叠加优化手段,因此先以单机 8 卡作为 baseline;客户最终要求必须单卡训练,据此调整优化思路,最终落地注意力 FA2 改造 + 算子融合。
+客户基于 **DeepSpeed-Z2** 训练 **OpenPI** 一开始在单卡上跑 显存占用 98% 难以叠加优化手段 因此先以单机 8 卡作为 baseline 客户最终要求必须单卡训练 据此调整优化思路 最终修改注意力实现 + 算子融合取得优化。
 
 ## 优化记录
 
@@ -23,7 +23,7 @@
 
 单卡关闭 grad_ckpt 会 OOM,offload 也无济于事,于是修改注意力实现路径。
 
-**FA 底层逻辑要点**(详见 Qwen3.5-0.8B 训练优化 1.3.1 部分):
+**FA 底层逻辑要点**
 
 - FA 加速基于分块 + 融合,降低的是显存读写量而非计算量
 - 原生支持 GQA(`8:1` 的 Q/KV 比例,不复制 KV)
@@ -39,7 +39,7 @@
    attention_mask = attention_mask[:, 0].eq(0).any(dim=-2)
    ```
 
-   拆掉冗余 head 维、加性 → bool、在 Sq 维折叠成 `[B, Sk]`。因为 `split_forward` 模式下一次只跑 prefix 或 suffix,块内双向,掩码只需表达"哪些列是 padding",2D 掩码足够
+   拆掉冗余维度、加性注意力改为bool、在 Sq 维折叠成 `[B, Sk]`。因为 `split_forward` 模式下一次只跑 prefix 或 suffix,块内双向,掩码只需表达"哪些列是 padding",2D 掩码足够
 3. **prefix KV cache dtype 对齐**:FA2 对 dtype 一致性要求严格,在梯度检查点重算前把 KV cache 转成当前输入 dtype
 
 **收益**(prefix/suffix checkpoint attention 耗时):
@@ -69,6 +69,4 @@ export HA_USE_FUSED_GELU_MUL=1
 | --- | --- | --- | --- |
 | 单次迭代耗时 | 2.07 s/it | 1.53 s/it | 1.57 s/it |
 
-## 文档
-
-- [openpi.pdf](./openpi.pdf)(原始报告)
+调优在客户机器上进行 因此无法拉取代码仓

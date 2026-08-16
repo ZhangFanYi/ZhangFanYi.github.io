@@ -1,8 +1,9 @@
-# 项目 07:DeepSeek-V4-Flash 推理优化(Flash-FP8 性能瓶颈排查)
+# DeepSeek-V4-Flash 推理优化(Flash-FP8 性能瓶颈排查)
 
 ## 概述
 
-针对 DeepSeek-V4(Flash-FP8)推理性能短板,在自有芯片(NMZ1101)与 H20 上分别抓取 prof trace,通过 SQL 聚合生成算子级性能对比表,定位出**量化 GEMM、MLA/FlashAttention、MoE 融合**三大瓶颈。
+针对 DeepSeek-V4(Flash-FP8)推理性能短板,在自有芯片(NMZ1101)与 H20 上分别抓取 prof trace,通过 SQL 聚合生成算子级性能对比表,定位出**量化 GEMM、MLA/FlashAttention、MoE 融合**三大瓶颈。该项目为
+整个一级部门在五月中下旬的第一大任务 我作为客户应用优化部的唯一参与人 全程测试/分析不同并行方案时的性能优劣 并同步给研发同事进行优化
 
 ## 方法:算子级 Prof 对比
 
@@ -62,3 +63,4 @@ code/
 
 - [Deepseek V4 性能瓶颈排查.pdf](./Deepseek V4 性能瓶颈排查.pdf)(原始报告)
 - [dpsk-V4 nmz1101 & H20 内部测试.xlsx](./dpsk-V4 nmz1101 & H20 内部测试.xlsx)(详细数据)
+

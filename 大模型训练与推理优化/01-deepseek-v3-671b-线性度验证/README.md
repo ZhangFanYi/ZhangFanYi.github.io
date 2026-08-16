@@ -38,7 +38,6 @@ code/
 ├── Megatron-LM/    # Megatron-LM(DCU 适配版)
 ├── Megatron-Energon/  # Megatron-Energon(子模块,DCU 适配版)
 ├── examples/       # 训练示例(deepseek_v3 / GLM / llama / qwen 等)
-├── pretrain_gpt.py / pretrain_vl.py  # 训练入口
 └── README.md
 ```
 

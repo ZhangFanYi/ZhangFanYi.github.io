@@ -1,0 +1,9 @@
+[submodule "Megatron-LM"]
+	path = Megatron-LM
+	url = https://github.com/NVIDIA/Megatron-LM.git
+	branch = main 
+[submodule]
+	Megatron-LM = main
+[submodule "Megatron-Energon"]
+	path = Megatron-Energon
+	url = https://github.com/NVIDIA/Megatron-Energon.git

@@ -29,6 +29,17 @@
 
 <img width="912" height="491" alt="image" src="https://github.com/user-attachments/assets/c6b4e1ca-8bfd-4327-a1c7-8eec8b078e4e" />
 
+## 代码
 
+[code](./code/) 为 DCU 版 Megatron 训练框架(`dcu_megatron`):
 
+```
+code/
+├── Megatron-LM/    # Megatron-LM(DCU 适配版)
+├── Megatron-Energon/  # Megatron-Energon(子模块,DCU 适配版)
+├── examples/       # 训练示例(deepseek_v3 / GLM / llama / qwen 等)
+├── pretrain_gpt.py / pretrain_vl.py  # 训练入口
+└── README.md
+```
 
+DeepSeek-V3 相关脚本见 `code/examples/deepseek_v3/`。

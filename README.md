@@ -33,8 +33,8 @@
 
 ## 能力标签
 
-- **训练优化**:Megatron / DeepSpeed / FSDP / verl, prof 抓取与算子级分析,ZeRO 与 Attention 选型, 模型框架层行为优化
+- **训练优化**:Megatron / DeepSpeed / FSDP / ddp / verl, prof 抓取与算子级分析, 框架与 Attention 选型, 模型框架层行为优化
 - **推理优化**:vLLM / SGLang,PD 分离 / IFB / Mooncake 部署,模型量化与固定缓存命中压测,GPU 与国产加速卡(DCU / 沐曦)性能对标
-- **具身智能**:不同具身智能的适配于优化
+- **集群任务**:多机通信 / K8s / Ray / mp / Clusconf / mpirun /等多机任务启动 基础硬件故障识别
   
 欢迎提出任何宝贵意见！

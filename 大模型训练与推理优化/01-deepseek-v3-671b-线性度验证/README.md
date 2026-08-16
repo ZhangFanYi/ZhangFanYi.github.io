@@ -1,4 +1,4 @@
-# 项目 01:DeepSeek-V3 671B 千卡集群训练 & 线性度验证
+# DeepSeek-V3 671B 千卡集群训练 & 线性度验证
 
 ## 概述
 
@@ -25,14 +25,10 @@
 
 - 128 节点 / 256 节点各训练 3 小时,观察 loss 收敛并记录单次迭代耗时
 - 256 集群 GBS 为 128 集群的一倍,单卡 mbs 一致(算力翻倍)
-- 按前 40 步总耗时计算,**线性度 97.1%**,远超客户 0.8 的验收线
+- 按前 40 步总耗时计算,**线性度 97.1%**,远超客户 >80% 的验收线
 
-## 经验沉淀
+<img width="912" height="491" alt="image" src="https://github.com/user-attachments/assets/c6b4e1ca-8bfd-4327-a1c7-8eec8b078e4e" />
 
-- **故障定位方法**:训练报错/退出时,依次排查 rccltest、dmesg、/var/log/syslog、ipmitool sel list,再找网络同事排查 IB 网卡
-- 典型报错:`NET/IB Got completion ... status=5`(IB 通信异常)与无错误 segfault 退出
-- 备份脚本:DeepSeek-V4-Pro 1.6T 参数训练脚本备份,后续 v4 需求可直接复用
 
-## 文档
 
-- [合肥训练场-线性度.pdf](./合肥训练场-线性度.pdf)(原始报告)
+

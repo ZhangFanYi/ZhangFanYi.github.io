@@ -28,14 +28,14 @@
 | 13 | [LingBot-VA-DCU](./具身智能模型优化/lingbot-va-dcu/) | ✅ 性能提升28% |
 | 14 | [LingBot-VLA-DCU](./具身智能模型优化/lingbot-vla-dcu/) | ✅ 性能提升52% |
 | 15 | [Cosmos3-Nano-DCU](./具身智能模型优化/cosmos-framework-dcu/) | ✅ 性能提升22% |
-| 16 | [OpenPI-DCU 训练优化(π0 动作策略)](./具身智能模型优化/openpi-dcu/) | ✅ 性能提升26% |
+| 16 | [OpenPI-DCU](./具身智能模型优化/openpi-dcu/) | ✅ 性能提升26% |
 
 ---
 
 ## 能力标签
 
 - **训练优化**:Megatron / DeepSpeed / FSDP / ddp / verl, prof 抓取与算子级分析, 框架与 Attention 选型, 模型框架层行为优化
-- **推理优化**:vLLM / SGLang,PD 分离 / IFB / Mooncake 部署,模型量化与固定缓存命中压测,GPU 与国产加速卡(DCU / 沐曦)性能对标
+- **推理优化**:vLLM / SGLang, PD分离 / IFB / Mooncake 部署,模型量化,kv-cache量化/固定缓存命中压测
 - **集群任务**:多机通信 / K8s / Ray / mp / Clusconf / mpirun /等多机任务启动 基础硬件故障识别
   
 欢迎提出任何宝贵意见！
